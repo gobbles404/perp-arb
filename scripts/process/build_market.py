@@ -206,9 +206,9 @@ def build_market_data(symbol=SYMBOL, interval=INTERVALS[0]):
                 funding_temp = None
             else:
                 # Create a complete hourly series based on spot data time range
-                start_time = spot_df["Timestamp"].min().floor("H")
-                end_time = spot_df["Timestamp"].max().ceil("H")
-                hourly_range = pd.date_range(start=start_time, end=end_time, freq="H")
+                start_time = spot_df["Timestamp"].min().floor("h")
+                end_time = spot_df["Timestamp"].max().ceil("h")
+                hourly_range = pd.date_range(start=start_time, end=end_time, freq="h")
 
                 # Create a DataFrame with the complete hourly range
                 hourly_df = pd.DataFrame({"Timestamp": hourly_range})
