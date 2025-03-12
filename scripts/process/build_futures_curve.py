@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 """
 Script to build futures term structure from CSV files for multiple intervals.
-Usage: python build_futures_index.py
+Usage:
+  python build_futures_curve.py  # Uses defaults
+  python build_futures_curve.py --symbol ETHUSDT --intervals 1d,8h,1h --futures-roll 7d
 """
 
 import os
@@ -10,6 +12,7 @@ import logging
 import csv
 import re
 import pandas as pd
+import argparse
 from datetime import datetime
 
 # Configure logging
@@ -20,10 +23,14 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Parameters (to be moved to globals.py eventually)
-INDEX = "ETHUSDT"  # Updated to match the screenshot directory
-INTERVALS = ["1d", "8h", "1h"]  # List of intervals to process
-FUTURES_ROLL = "7d"  # Roll to next contract 7 days before delivery
+# Default parameters (still use these for backwards compatibility)
+DEFAULT_INDEX = os.environ.get(
+    "INDEX", "BTCUSDT"
+)  # Get from environment variable or use default
+DEFAULT_INTERVALS = os.environ.get("INTERVALS", "1d,8h,1h").split(
+    ","
+)  # Get from environment or use default
+DEFAULT_FUTURES_ROLL = "7d"  # Roll to next contract 7 days before delivery
 
 
 def calculate_roll_date(delivery_date, futures_roll):
@@ -451,15 +458,50 @@ def process_interval(index, interval, futures_roll):
         return None
 
 
+def parse_arguments():
+    """Parse command line arguments."""
+    parser = argparse.ArgumentParser(description="Build futures term structure.")
+    parser.add_argument(
+        "--symbol",
+        type=str,
+        default=DEFAULT_INDEX,
+        help=f"Symbol to process (e.g., {DEFAULT_INDEX})",
+    )
+    parser.add_argument(
+        "--intervals",
+        type=str,
+        default=",".join(DEFAULT_INTERVALS),
+        help=f"Time intervals, comma-separated (e.g., {','.join(DEFAULT_INTERVALS)})",
+    )
+    parser.add_argument(
+        "--futures-roll",
+        type=str,
+        default=DEFAULT_FUTURES_ROLL,
+        help=f"Future roll period (e.g., {DEFAULT_FUTURES_ROLL})",
+    )
+    return parser.parse_args()
+
+
 def main():
     """Main function to build futures term structure for multiple intervals."""
+    # Parse command line arguments
+    args = parse_arguments()
+
+    symbol = args.symbol
+    intervals = args.intervals.split(",") if "," in args.intervals else [args.intervals]
+    futures_roll = args.futures_roll
+
+    logger.info(
+        f"Building futures term structure for {symbol} with intervals {intervals}"
+    )
+
     results = {}
 
-    for interval in INTERVALS:
-        logger.info(f"Processing index {INDEX} with interval {interval}")
-        result = process_interval(INDEX, interval, FUTURES_ROLL)
+    for interval in intervals:
+        logger.info(f"Processing index {symbol} with interval {interval}")
+        result = process_interval(symbol, interval, futures_roll)
         results[interval] = result
-        logger.info(f"Completed processing for {INDEX}_{interval}")
+        logger.info(f"Completed processing for {symbol}_{interval}")
         logger.info("-" * 80)  # Separator for better readability in logs
 
     # Return the results dictionary

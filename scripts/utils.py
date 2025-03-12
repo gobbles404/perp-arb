@@ -1,7 +1,20 @@
 import os
+import logging
 from datetime import datetime, timezone, timedelta
 import pandas as pd
 import re
+
+# Configure logging
+logger = logging.getLogger("utils")
+if not logger.handlers:  # Only add handler if not already configured
+    handler = logging.StreamHandler()
+    formatter = logging.Formatter(
+        "%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S",
+    )
+    handler.setFormatter(formatter)
+    logger.addHandler(handler)
+    logger.setLevel(logging.INFO)
 
 # Create base directory structure
 CSV_DIR = "data"
@@ -48,8 +61,8 @@ def get_last_expected_timestamp(interval):
     else:
         raise ValueError(f"Unsupported unit: {unit}")
 
-    print(
-        f"🕒 Last expected timestamp for {interval}: {pd.to_datetime(last_expected_ts, unit='ms')}"
+    logger.info(
+        f"Last expected timestamp for {interval}: {pd.to_datetime(last_expected_ts, unit='ms')}"
     )
     return last_expected_ts
 
@@ -112,7 +125,7 @@ def fetch_klines(client, symbol, interval, start_ts, end_ts, contract_type="Futu
     last_valid_ts = None
 
     while current_ts < end_ts:
-        print(f"🔄 Fetching {symbol} from {pd.to_datetime(current_ts, unit='ms')}")
+        logger.info(f"Fetching {symbol} from {pd.to_datetime(current_ts, unit='ms')}")
 
         try:
             if contract_type == "Spot":
@@ -126,13 +139,13 @@ def fetch_klines(client, symbol, interval, start_ts, end_ts, contract_type="Futu
 
             if not klines:
                 if last_valid_ts:
-                    print(
-                        f"✅ {symbol} contract likely expired at {pd.to_datetime(last_valid_ts, unit='ms')}"
+                    logger.info(
+                        f"{symbol} contract likely expired at {pd.to_datetime(last_valid_ts, unit='ms')}"
                     )
                     break  # Stop fetching since the contract has expired
                 else:
-                    print(
-                        f"⚠️ No data returned for {symbol} at {pd.to_datetime(current_ts, unit='ms')}"
+                    logger.warning(
+                        f"No data returned for {symbol} at {pd.to_datetime(current_ts, unit='ms')}"
                     )
                     return None
 
@@ -162,16 +175,16 @@ def fetch_klines(client, symbol, interval, start_ts, end_ts, contract_type="Futu
 
             current_ts = last_valid_ts + 1
 
-            print(
-                f"✅ Fetched {len(df)} rows. Next start: {pd.to_datetime(current_ts, unit='ms')}"
+            logger.info(
+                f"Fetched {len(df)} rows. Next start: {pd.to_datetime(current_ts, unit='ms')}"
             )
 
         except Exception as e:
-            print(f"❌ Error fetching {symbol}: {str(e)}")
+            logger.error(f"Error fetching {symbol}: {str(e)}")
             return None
 
     if not all_data:
-        print(f"⚠️ No data collected for {symbol}.")
+        logger.warning(f"No data collected for {symbol}.")
         return None
 
     # Convert list back into DataFrame

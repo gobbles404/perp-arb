@@ -8,16 +8,20 @@ It performs no calculations or transformations on the data.
 
 Usage:
     Can be run directly with default settings:
-    $ python scripts/process/build_markets.py
+    $ python scripts/process/build_market.py
+
+    Or with custom symbol and interval:
+    $ python scripts/process/build_market.py --symbol ETHUSDT --interval 8h
 
     Or imported and used with custom parameters:
-    >>> from scripts.process.build_markets import build_market_data
+    >>> from scripts.process.build_market import build_market_data
     >>> build_market_data(symbol="ETHUSDT", interval="4h")
 """
 
 import pandas as pd
 import os
 import logging
+import argparse
 from pathlib import Path
 
 # Configure logging
@@ -365,13 +369,40 @@ def build_market_data(symbol=SYMBOL, interval=INTERVALS[0]):
     return merged_df
 
 
+def parse_arguments():
+    """Parse command line arguments."""
+    parser = argparse.ArgumentParser(description="Build consolidated market data.")
+    parser.add_argument(
+        "--symbol",
+        type=str,
+        default=SYMBOL,
+        help=f"Trading pair symbol (e.g., {SYMBOL})",
+    )
+    parser.add_argument(
+        "--interval",
+        type=str,
+        default=None,
+        help=f"Time interval (e.g., {', '.join(INTERVALS)}). If not specified, all intervals will be processed.",
+    )
+    return parser.parse_args()
+
+
 if __name__ == "__main__":
-    logger.info(f"Building market data for {SYMBOL}")
+    args = parse_arguments()
 
-    for interval in INTERVALS:
-        logger.info(f"Processing interval: {interval}")
-        build_market_data(SYMBOL, interval)
-        logger.info(f"Completed processing for {SYMBOL}_{interval}")
-        logger.info("-" * 80)  # Separator for better readability in logs
+    symbol = args.symbol
 
-    logger.info("Market data build complete for all intervals")
+    # If interval is specified, process just that interval
+    if args.interval:
+        logger.info(f"Processing {symbol} with interval {args.interval}")
+        build_market_data(symbol, args.interval)
+    else:
+        # Otherwise process all intervals
+        logger.info(f"Building market data for {symbol} with all intervals")
+        for interval in INTERVALS:
+            logger.info(f"Processing interval: {interval}")
+            build_market_data(symbol, interval)
+            logger.info(f"Completed processing for {symbol}_{interval}")
+            logger.info("-" * 80)  # Separator for better readability in logs
+
+    logger.info("Market data build complete")

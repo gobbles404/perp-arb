@@ -25,6 +25,7 @@ import sys
 import os
 import csv
 from datetime import datetime
+import subprocess
 
 # Add the scripts directory to Python's path
 current_dir = os.path.dirname(os.path.abspath(__file__))
@@ -338,6 +339,40 @@ def main():
             premium_fetcher.fetch_all()
 
             logger.info(f"All data fetching complete for {args.symbol}")
+
+            # Add this at the end of the "all" command section
+            # Run the data pipeline to build futures curve and market data
+            logger.info("Running data pipeline to process the fetched data...")
+            try:
+                # Convert intervals list to space-separated string
+                interval_str = (
+                    " ".join(intervals)
+                    if intervals
+                    else " ".join(DEFAULT_INTERVALS["futures"])
+                )
+
+                # Run the shell script with the symbol and intervals as arguments
+                cmd = ["./data_pipeline.sh", args.symbol, interval_str]
+                logger.info(f"Executing: {' '.join(cmd)}")
+
+                result = subprocess.run(cmd, check=True, text=True, capture_output=True)
+
+                # Log the output from the shell script
+                if result.stdout:
+                    for line in result.stdout.splitlines():
+                        logger.info(f"Pipeline: {line}")
+
+                if result.stderr:
+                    for line in result.stderr.splitlines():
+                        logger.warning(f"Pipeline error: {line}")
+
+                logger.info("Data pipeline completed successfully")
+            except subprocess.CalledProcessError as e:
+                logger.error(f"Error running data pipeline: {e}")
+                if e.stderr:
+                    logger.error(f"Error output: {e.stderr}")
+            except Exception as e:
+                logger.error(f"Error running data pipeline: {e}")
 
         else:
             logger.error(f"Unknown command: {args.command}")

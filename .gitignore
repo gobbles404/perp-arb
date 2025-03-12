@@ -1,3 +1,26 @@
 venv/
 .env
 *.env
+
+# Data directories
+data/processed/
+data/raw/
+
+# Scratch directory
+scratch/
+
+# Logs
+logs/
+
+# Python cache files
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+
+# Jupyter Notebook
+.ipynb_checkpoints
+
+# OS specific files
+.DS_Store
+Thumbs.db
