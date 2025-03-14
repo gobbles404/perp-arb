@@ -1,5 +1,5 @@
 """
-Visualization functions for trading strategy analysis.
+Modified visualization function to fix the datetime conversion overflow error.
 """
 
 import pandas as pd
@@ -12,42 +12,121 @@ from scipy import stats
 
 
 def create_performance_charts(results, metrics, output_dir="strategy/results"):
-    """Generate visualization charts for backtest results."""
+    """Generate visualization charts for backtest results with improved date handling."""
     # Create directory for plots
     os.makedirs(output_dir, exist_ok=True)
     timestamp = datetime.now().strftime("%Y%m%d%H%M%S")
 
-    # Create figure with subplots
-    fig, axes = plt.subplots(
-        5, 1, figsize=(14, 24), gridspec_kw={"height_ratios": [2, 1, 1, 1, 1.5]}
-    )
+    # Ensure dates are proper datetime objects
+    try:
+        # Convert dates to pandas datetime if they're not already
+        if isinstance(results["dates"], list):
+            # Check if dates are already datetime objects
+            if not all(isinstance(d, datetime) for d in results["dates"]):
+                dates = pd.to_datetime(results["dates"])
+            else:
+                dates = results["dates"]
+        else:
+            dates = pd.to_datetime(results["dates"])
 
-    # Plot 1: Equity curve and notional value
-    plot_equity_curve(axes[0], results, metrics)
+        # Filter out any problematic dates (too far in future/past)
+        # Use a safe date range (e.g., 1970 to 2100)
+        min_safe_date = pd.Timestamp("1970-01-01")
+        max_safe_date = pd.Timestamp("2100-01-01")
 
-    # Plot 2: Cumulative PnL components
-    plot_pnl_components(axes[1], results)
+        valid_dates_mask = (dates >= min_safe_date) & (dates <= max_safe_date)
 
-    # Plot 3: Net Market PnL
-    plot_net_market_pnl(axes[2], results, metrics)
+        if not all(valid_dates_mask):
+            print(
+                f"Warning: Filtering out {sum(~valid_dates_mask)} invalid date entries"
+            )
 
-    # Plot 4: Basis and Funding Rate
-    plot_basis_funding_time_series(axes[3], results["data"])
+            # Create filtered versions of all time series data
+            filtered_dates = dates[valid_dates_mask]
+            filtered_equity = pd.Series(results["equity_curve"])[
+                valid_dates_mask
+            ].values
+            filtered_spot_pnl = pd.Series(results["spot_pnl"])[valid_dates_mask].values
+            filtered_perp_pnl = pd.Series(results["perp_pnl"])[valid_dates_mask].values
+            filtered_funding = pd.Series(results["cumulative_funding"])[
+                valid_dates_mask
+            ].values
+            filtered_net_market_pnl = pd.Series(results["net_market_pnl"])[
+                valid_dates_mask
+            ].values
+            filtered_notional = pd.Series(results["notional_values"])[
+                valid_dates_mask
+            ].values
+        else:
+            # Use original data if all dates are valid
+            filtered_dates = dates
+            filtered_equity = results["equity_curve"]
+            filtered_spot_pnl = results["spot_pnl"]
+            filtered_perp_pnl = results["perp_pnl"]
+            filtered_funding = results["cumulative_funding"]
+            filtered_net_market_pnl = results["net_market_pnl"]
+            filtered_notional = results["notional_values"]
 
-    # Plot 5: Basis vs Funding Rate Scatter Plot
-    plot_basis_funding_correlation(axes[4], results["data"], metrics)
+        # Create figure with subplots
+        fig, axes = plt.subplots(
+            5, 1, figsize=(14, 24), gridspec_kw={"height_ratios": [2, 1, 1, 1, 1.5]}
+        )
 
-    # Format x-axis dates for time series plots
-    for ax in axes[:-1]:  # Skip the scatter plot
-        ax.xaxis.set_major_formatter(mdates.DateFormatter("%Y-%m-%d"))
-        ax.xaxis.set_major_locator(mdates.MonthLocator(interval=1))
+        # Plot 1: Equity curve and notional value with filtered data
+        plot_equity_curve(
+            axes[0],
+            {
+                "dates": filtered_dates,
+                "equity_curve": filtered_equity,
+                "notional_values": filtered_notional,
+            },
+            metrics,
+        )
 
-    # Layout and save
-    plt.tight_layout()
-    fig.autofmt_xdate()
+        # Plot 2: Cumulative PnL components with filtered data
+        plot_pnl_components(
+            axes[1],
+            {
+                "dates": filtered_dates,
+                "spot_pnl": filtered_spot_pnl,
+                "perp_pnl": filtered_perp_pnl,
+                "cumulative_funding": filtered_funding,
+            },
+        )
 
-    plt.savefig(f"{output_dir}/backtest_results_{timestamp}.png")
-    plt.show()
+        # Plot 3: Net Market PnL with filtered data
+        plot_net_market_pnl(
+            axes[2],
+            {"dates": filtered_dates, "net_market_pnl": filtered_net_market_pnl},
+            metrics,
+        )
+
+        # Plot 4: Basis and Funding Rate - ensure data["Timestamp"] is properly handled
+        plot_basis_funding_time_series(axes[3], results["data"])
+
+        # Plot 5: Basis vs Funding Rate Scatter Plot
+        plot_basis_funding_correlation(axes[4], results["data"], metrics)
+
+        # Format x-axis dates for time series plots
+        for ax in axes[:-1]:  # Skip the scatter plot
+            ax.xaxis.set_major_formatter(mdates.DateFormatter("%Y-%m-%d"))
+            ax.xaxis.set_major_locator(mdates.MonthLocator(interval=1))
+            plt.setp(ax.xaxis.get_majorticklabels(), rotation=45, ha="right")
+
+        # Layout and save - use tight_layout with a larger pad to avoid issues
+        plt.tight_layout(pad=3.0)
+        fig.autofmt_xdate(rotation=45)
+
+        plt.savefig(f"{output_dir}/backtest_results_{timestamp}.png")
+        plt.close(fig)  # Close the figure to free memory
+
+        print(
+            f"Performance charts saved to {output_dir}/backtest_results_{timestamp}.png"
+        )
+
+    except Exception as e:
+        print(f"Error creating performance charts: {str(e)}")
+        print("Continuing with backtesting process despite chart error.")
 
 
 def plot_equity_curve(ax, results, metrics):
@@ -67,9 +146,20 @@ def plot_equity_curve(ax, results, metrics):
     # Add annotations
     max_equity = max(results["equity_curve"])
     min_equity = min(results["equity_curve"])
+    max_idx = (
+        results["equity_curve"].index(max_equity)
+        if isinstance(results["equity_curve"], list)
+        else np.argmax(results["equity_curve"])
+    )
+    min_idx = (
+        results["equity_curve"].index(min_equity)
+        if isinstance(results["equity_curve"], list)
+        else np.argmin(results["equity_curve"])
+    )
+
     ax.annotate(
         f"Max: ${max_equity:.2f}",
-        xy=(results["dates"][results["equity_curve"].index(max_equity)], max_equity),
+        xy=(results["dates"][max_idx], max_equity),
         xytext=(10, 20),
         textcoords="offset points",
         arrowprops=dict(arrowstyle="->", connectionstyle="arc3,rad=.2"),
@@ -77,7 +167,7 @@ def plot_equity_curve(ax, results, metrics):
 
     ax.annotate(
         f"Min: ${min_equity:.2f}",
-        xy=(results["dates"][results["equity_curve"].index(min_equity)], min_equity),
+        xy=(results["dates"][min_idx], min_equity),
         xytext=(10, -20),
         textcoords="offset points",
         arrowprops=dict(arrowstyle="->", connectionstyle="arc3,rad=.2"),
@@ -95,10 +185,10 @@ def plot_equity_curve(ax, results, metrics):
     )
     ax1b.set_ylabel("Notional Value ($)", color="purple")
     ax1b.tick_params(axis="y", labelcolor="purple")
-    ax1b.yaxis.set_major_formatter("${x:,.0f}")
+    ax1b.yaxis.set_major_formatter("{x:,.0f}")
 
     # Format y-axis as currency
-    ax.yaxis.set_major_formatter("${x:,.0f}")
+    ax.yaxis.set_major_formatter("{x:,.0f}")
 
     # Add key metrics as text
     props = dict(boxstyle="round", facecolor="wheat", alpha=0.5)
@@ -181,7 +271,7 @@ def plot_pnl_components(ax, results):
     )
 
     # Format y-axis as currency
-    ax.yaxis.set_major_formatter("${x:,.0f}")
+    ax.yaxis.set_major_formatter("{x:,.0f}")
 
     ax.grid(True)
     ax.legend(loc="best")
@@ -201,22 +291,26 @@ def plot_net_market_pnl(ax, results, metrics):
     ax.axhline(y=0, color="black", linestyle="-", alpha=0.3)
 
     # Format y-axis as currency
-    ax.yaxis.set_major_formatter("${x:,.0f}")
+    ax.yaxis.set_major_formatter("{x:,.0f}")
 
     # Add annotations for max and min net PnL
-    net_pnl_max = metrics["net_pnl_max"]
-    net_pnl_min = metrics["net_pnl_min"]
+    net_pnl_max = metrics.get("net_pnl_max", max(results["net_market_pnl"]))
+    net_pnl_min = metrics.get("net_pnl_min", min(results["net_market_pnl"]))
 
-    max_idx = (
-        results["net_market_pnl"].index(net_pnl_max)
-        if net_pnl_max in results["net_market_pnl"]
-        else 0
-    )
-    min_idx = (
-        results["net_market_pnl"].index(net_pnl_min)
-        if net_pnl_min in results["net_market_pnl"]
-        else 0
-    )
+    # Handle finding the index in a way that works for both lists and numpy arrays
+    if isinstance(results["net_market_pnl"], list):
+        try:
+            max_idx = results["net_market_pnl"].index(net_pnl_max)
+        except ValueError:
+            max_idx = 0
+
+        try:
+            min_idx = results["net_market_pnl"].index(net_pnl_min)
+        except ValueError:
+            min_idx = 0
+    else:
+        max_idx = np.argmax(results["net_market_pnl"])
+        min_idx = np.argmin(results["net_market_pnl"])
 
     if max_idx > 0:
         ax.annotate(
@@ -240,8 +334,8 @@ def plot_net_market_pnl(ax, results, metrics):
     net_pnl_props = dict(boxstyle="round", facecolor="lightskyblue", alpha=0.5)
     net_pnl_text = "\n".join(
         (
-            f"Net PnL Volatility: ${metrics['net_pnl_volatility']:.2f}",
-            f"Net PnL Range: ${metrics['net_pnl_range']:.2f}",
+            f"Net PnL Volatility: ${metrics.get('net_pnl_volatility', 0):.2f}",
+            f"Net PnL Range: ${metrics.get('net_pnl_range', 0):.2f}",
         )
     )
     ax.text(
@@ -262,16 +356,43 @@ def plot_basis_funding_time_series(ax, data):
     """Plot basis and funding rate time series with inverted funding axis."""
     ax.set_title("Basis and Funding Rate (Inverted)")
 
+    # Convert timestamps to datetime if they're not already
+    if "Timestamp" in data.columns:
+        # Copy to avoid modifying the original data
+        data_copy = data.copy()
+        # Convert Timestamp column to datetime if it's not already
+        if not pd.api.types.is_datetime64_any_dtype(data_copy["Timestamp"]):
+            data_copy["Timestamp"] = pd.to_datetime(data_copy["Timestamp"])
+
+        # Filter out invalid timestamps (from far future/past)
+        min_safe_date = pd.Timestamp("1970-01-01")
+        max_safe_date = pd.Timestamp("2100-01-01")
+
+        valid_dates_mask = (data_copy["Timestamp"] >= min_safe_date) & (
+            data_copy["Timestamp"] <= max_safe_date
+        )
+        if not all(valid_dates_mask):
+            print(
+                f"Warning: Filtering out {sum(~valid_dates_mask)} invalid timestamps in basis/funding plot"
+            )
+            data_copy = data_copy[valid_dates_mask].reset_index(drop=True)
+    else:
+        # If there's no Timestamp column, just use the original data
+        data_copy = data
+
     # Calculate basis (difference between perp and spot)
     basis_pct = (
-        data["basis_pct"]
-        if "basis_pct" in data.columns
-        else [(p / s - 1) * 100 for p, s in zip(data["perp_close"], data["spot_close"])]
+        data_copy["basis_pct"]
+        if "basis_pct" in data_copy.columns
+        else [
+            (p / s - 1) * 100
+            for p, s in zip(data_copy["perp_close"], data_copy["spot_close"])
+        ]
     )
 
     # Plot basis
     color_basis = "tab:blue"
-    ax.plot(data["Timestamp"], basis_pct, label="Basis %", color=color_basis)
+    ax.plot(data_copy["Timestamp"], basis_pct, label="Basis %", color=color_basis)
     ax.set_ylabel("Basis (%)", color=color_basis)
     ax.tick_params(axis="y", labelcolor=color_basis)
 
@@ -281,13 +402,13 @@ def plot_basis_funding_time_series(ax, data):
 
     # Convert funding rate to annualized percentage
     funding_pct = (
-        data["funding_apr"]
-        if "funding_apr" in data.columns
-        else data["funding_rate"] * 3 * 365 * 100
+        data_copy["funding_apr"]
+        if "funding_apr" in data_copy.columns
+        else data_copy["funding_rate"] * 3 * 365 * 100
     )
 
     ax4b.plot(
-        data["Timestamp"],
+        data_copy["Timestamp"],
         funding_pct,
         label="Funding Rate (APR)",
         color=color_funding,
@@ -348,30 +469,12 @@ def plot_basis_funding_correlation(ax, data, metrics):
     # Clean data for scatter plot
     valid_indices = ~(np.isnan(basis_pct) | np.isnan(funding_pct))
 
-    # Fixed list comprehensions with proper formatting
-    valid_basis = np.array(
-        [
-            basis_pct.iloc[i] if isinstance(basis_pct, pd.Series) else basis_pct[i]
-            for i in range(len(basis_pct))
-            if (
-                valid_indices.iloc[i]
-                if isinstance(valid_indices, pd.Series)
-                else valid_indices[i]
-            )
-        ]
-    )
+    # Convert to numpy arrays for safety and easier filtering
+    basis_pct_np = np.array(basis_pct)
+    funding_pct_np = np.array(funding_pct)
 
-    valid_funding = np.array(
-        [
-            funding_pct.iloc[i] if hasattr(funding_pct, "iloc") else funding_pct[i]
-            for i in range(len(funding_pct))
-            if (
-                valid_indices.iloc[i]
-                if hasattr(valid_indices, "iloc")
-                else valid_indices[i]
-            )
-        ]
-    )
+    valid_basis = basis_pct_np[valid_indices]
+    valid_funding = funding_pct_np[valid_indices]
 
     # Create scatter plot
     scatter = ax.scatter(valid_basis, valid_funding, alpha=0.5, c="blue")
@@ -381,39 +484,42 @@ def plot_basis_funding_correlation(ax, data, metrics):
     # Add regression line
     if len(valid_basis) > 1 and len(valid_funding) > 1:
         # Use scipy.stats.linregress to get regression line
-        slope, intercept, r_value, p_value, std_err = stats.linregress(
-            valid_basis, valid_funding
-        )
-
-        # Plot regression line
-        x_range = np.linspace(min(valid_basis), max(valid_basis), 100)
-        ax.plot(
-            x_range,
-            intercept + slope * x_range,
-            "r-",
-            linewidth=2,
-            label=f"y = {slope:.4f}x + {intercept:.4f}",
-        )
-
-        # Add text box with correlation info
-        corr_props = dict(boxstyle="round", facecolor="lightgreen", alpha=0.5)
-        corr_text = "\n".join(
-            (
-                f"Correlation: {metrics['basis_funding_correlation']:.4f}",
-                f"R²: {r_value**2:.4f}",
-                f"p-value: {metrics['basis_funding_p_value']:.4f}",
-                f"Regression: y = {slope:.4f}x + {intercept:.4f}",
+        try:
+            slope, intercept, r_value, p_value, std_err = stats.linregress(
+                valid_basis, valid_funding
             )
-        )
-        ax.text(
-            0.02,
-            0.95,
-            corr_text,
-            transform=ax.transAxes,
-            fontsize=10,
-            verticalalignment="top",
-            bbox=corr_props,
-        )
+
+            # Plot regression line
+            x_range = np.linspace(min(valid_basis), max(valid_basis), 100)
+            ax.plot(
+                x_range,
+                intercept + slope * x_range,
+                "r-",
+                linewidth=2,
+                label=f"y = {slope:.4f}x + {intercept:.4f}",
+            )
+
+            # Add text box with correlation info
+            corr_props = dict(boxstyle="round", facecolor="lightgreen", alpha=0.5)
+            corr_text = "\n".join(
+                (
+                    f"Correlation: {metrics.get('basis_funding_correlation', r_value):.4f}",
+                    f"R²: {r_value**2:.4f}",
+                    f"p-value: {metrics.get('basis_funding_p_value', p_value):.4f}",
+                    f"Regression: y = {slope:.4f}x + {intercept:.4f}",
+                )
+            )
+            ax.text(
+                0.02,
+                0.95,
+                corr_text,
+                transform=ax.transAxes,
+                fontsize=10,
+                verticalalignment="top",
+                bbox=corr_props,
+            )
+        except Exception as e:
+            print(f"Warning: Could not calculate regression for scatter plot: {e}")
 
     # Add grid and zero lines
     ax.grid(True)

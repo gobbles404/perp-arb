@@ -17,20 +17,40 @@ def calculate_performance_metrics(results):
     exit_date = results["exit_date"]
     days_held = (exit_date - entry_date).days if isinstance(entry_date, datetime) else 0
 
-    # Final PnL values
-    spot_pnl = results["spot_pnl"][-1] if len(results["spot_pnl"]) > 0 else 0
-    perp_pnl = results["perp_pnl"][-1] if len(results["perp_pnl"]) > 0 else 0
-    funding_pnl = (
-        results["cumulative_funding"][-1]
-        if len(results["cumulative_funding"]) > 0
-        else 0
-    )
+    # Final PnL values - with NaN handling
+    try:
+        spot_pnl = results["spot_pnl"][-1] if len(results["spot_pnl"]) > 0 else 0
+        if np.isnan(spot_pnl):
+            spot_pnl = 0
+    except:
+        spot_pnl = 0
+
+    try:
+        perp_pnl = results["perp_pnl"][-1] if len(results["perp_pnl"]) > 0 else 0
+        if np.isnan(perp_pnl):
+            perp_pnl = 0
+    except:
+        perp_pnl = 0
+
+    try:
+        funding_pnl = (
+            results["cumulative_funding"][-1]
+            if len(results["cumulative_funding"]) > 0
+            else 0
+        )
+        if np.isnan(funding_pnl):
+            funding_pnl = 0
+    except:
+        funding_pnl = 0
+
     net_market_pnl = spot_pnl + perp_pnl
     total_pnl = final_capital - initial_capital
     fees_paid = results["entry_fee"] + results["exit_fee"]
 
     # Return metrics
-    total_return_pct = (final_capital / initial_capital - 1) * 100
+    total_return_pct = (
+        (final_capital / initial_capital - 1) * 100 if initial_capital > 0 else 0
+    )
 
     # Initialize time-based metrics
     annualized_return = 0.0
@@ -46,16 +66,23 @@ def calculate_performance_metrics(results):
         annualized_return = ((1 + total_return_pct / 100) ** ann_factor - 1) * 100
 
         # Funding metrics
-        funding_apr = (funding_pnl / initial_capital) * (365 / days_held) * 100
+        funding_apr = (
+            (funding_pnl / initial_capital) * (365 / days_held) * 100
+            if initial_capital > 0
+            else 0
+        )
 
         # APY (with compounding)
-        daily_funding_rate = funding_pnl / (initial_capital * days_held)
+        daily_funding_rate = (
+            funding_pnl / (initial_capital * days_held)
+            if initial_capital > 0 and days_held > 0
+            else 0
+        )
         funding_apy = ((1 + daily_funding_rate) ** 365 - 1) * 100
 
-        # Average funding rate
-        avg_funding_rate = np.mean(
-            [r for r in results["funding_rates"] if not np.isnan(r)]
-        )
+        # Average funding rate - with NaN handling
+        valid_funding_rates = [r for r in results["funding_rates"] if not np.isnan(r)]
+        avg_funding_rate = np.mean(valid_funding_rates) if valid_funding_rates else 0
         avg_funding_apr = avg_funding_rate * 3 * 365 * 100  # 3 funding periods per day
 
     # Risk metrics
@@ -64,14 +91,17 @@ def calculate_performance_metrics(results):
     # Calculate drawdown
     rolling_max = equity_series.cummax()
     drawdown = (equity_series / rolling_max - 1) * 100
-    max_drawdown = drawdown.min()
+    max_drawdown = drawdown.min() if not np.isnan(drawdown.min()) else 0
 
     # Calculate Sharpe
     if len(equity_series) > 1:
         daily_returns = equity_series.pct_change().dropna()
+        # Remove infinite values that might appear from division by zero
+        daily_returns = daily_returns.replace([np.inf, -np.inf], np.nan).dropna()
+
         sharpe_ratio = (
             np.sqrt(365) * daily_returns.mean() / daily_returns.std()
-            if daily_returns.std() > 0
+            if daily_returns.std() > 0 and not np.isnan(daily_returns.mean())
             else 0
         )
     else:
@@ -79,11 +109,14 @@ def calculate_performance_metrics(results):
 
     # Net PnL statistics
     net_pnl_series = pd.Series(results["net_market_pnl"])
+    net_pnl_series = net_pnl_series.replace([np.inf, -np.inf], np.nan).dropna()
 
     if len(net_pnl_series) > 1:
-        net_pnl_volatility = net_pnl_series.std()
-        net_pnl_max = net_pnl_series.max()
-        net_pnl_min = net_pnl_series.min()
+        net_pnl_volatility = (
+            net_pnl_series.std() if not np.isnan(net_pnl_series.std()) else 0
+        )
+        net_pnl_max = net_pnl_series.max() if not np.isnan(net_pnl_series.max()) else 0
+        net_pnl_min = net_pnl_series.min() if not np.isnan(net_pnl_series.min()) else 0
         net_pnl_range = net_pnl_max - net_pnl_min
     else:
         net_pnl_volatility = 0
@@ -110,45 +143,30 @@ def calculate_performance_metrics(results):
     p_value = 1
 
     if len(basis_values) > 1 and len(funding_values) > 1:
-        # Clean data
-        valid_indices = ~(np.isnan(basis_values) | np.isnan(funding_values))
+        # Clean data - replace NaN and infinite values
+        basis_array = np.array(basis_values)
+        funding_array = np.array(funding_values)
 
-        # Fixed syntax for list comprehension
-        valid_basis = np.array(
-            [
-                (
-                    basis_values.iloc[i]
-                    if isinstance(basis_values, pd.Series)
-                    else basis_values[i]
-                )
-                for i in range(len(basis_values))
-                if (
-                    valid_indices.iloc[i]
-                    if isinstance(valid_indices, pd.Series)
-                    else valid_indices[i]
-                )
-            ]
+        # Create mask for invalid values in either array
+        mask = ~(
+            np.isnan(basis_array)
+            | np.isnan(funding_array)
+            | np.isinf(basis_array)
+            | np.isinf(funding_array)
         )
 
-        valid_funding = np.array(
-            [
-                (
-                    funding_values.iloc[i]
-                    if hasattr(funding_values, "iloc")
-                    else funding_values[i]
-                )
-                for i in range(len(funding_values))
-                if (
-                    valid_indices.iloc[i]
-                    if hasattr(valid_indices, "iloc")
-                    else valid_indices[i]
-                )
-            ]
-        )
+        # Extract valid values using mask
+        valid_basis = basis_array[mask]
+        valid_funding = funding_array[mask]
 
-        # Calculate correlation
+        # Calculate correlation if we have enough valid data points
         if len(valid_basis) > 1 and len(valid_funding) > 1:
             correlation, p_value = stats.pearsonr(valid_basis, valid_funding)
+            # Handle potential NaN in correlation
+            if np.isnan(correlation):
+                correlation = 0
+            if np.isnan(p_value):
+                p_value = 1
 
     # Create metrics dictionary
     metrics = {
@@ -171,7 +189,9 @@ def calculate_performance_metrics(results):
         "net_pnl_max": net_pnl_max,
         "net_pnl_min": net_pnl_min,
         "net_pnl_range": net_pnl_range,
-        "capital_efficiency": results["final_notional"] / initial_capital,
+        "capital_efficiency": (
+            results["final_notional"] / initial_capital if initial_capital > 0 else 0
+        ),
         "basis_funding_correlation": correlation,
         "basis_funding_p_value": p_value,
     }

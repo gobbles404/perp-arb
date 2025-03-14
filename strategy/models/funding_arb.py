@@ -2,16 +2,33 @@
 Core funding arbitrage strategy implementation.
 """
 
+import numpy as np
+
 
 class FundingArbStrategy:
     """
     Simple long spot, short perp strategy that harvests funding rate.
     """
 
-    def __init__(self):
-        """Initialize the strategy."""
+    def __init__(self, timeframe="8h"):
+        """
+        Initialize the strategy.
+
+        Parameters:
+        - timeframe: The data timeframe ('1h', '8h', '1d', etc.)
+                     Used to adjust funding calculations
+        """
         self.position = None
         self.metrics = {}
+        self.timeframe = timeframe
+
+        # Set funding periods multiplier based on timeframe
+        if timeframe == "1d":
+            # For daily data, we need to account for 3 funding periods per day
+            self.funding_periods_multiplier = 3
+        else:
+            # For hourly or 8-hourly data, no adjustment needed
+            self.funding_periods_multiplier = 1
 
     def initialize_position(self, data, capital, leverage, fee_rate):
         """Initialize trading position with given parameters."""
@@ -60,6 +77,9 @@ class FundingArbStrategy:
         )
         print(f"  Total Notional: ${total_notional:.2f}")
         print(f"  Entry fee: ${entry_fee:.2f}")
+        print(
+            f"  Timeframe: {self.timeframe} (Funding multiplier: {self.funding_periods_multiplier}x)"
+        )
 
         return self.position
 
@@ -71,7 +91,11 @@ class FundingArbStrategy:
         current_date = data_row["Timestamp"]
         current_spot = data_row["spot_close"]
         current_perp = data_row["perp_close"]
+
+        # Handle potential NaN in funding rate
         funding_rate = data_row["funding_rate"]
+        if np.isnan(funding_rate):
+            funding_rate = 0
 
         # Calculate spot PnL
         spot_pnl = self.position["spot_quantity"] * (
@@ -86,8 +110,14 @@ class FundingArbStrategy:
         # Calculate net market PnL
         net_market_pnl = spot_pnl + perp_pnl
 
-        # Calculate funding payment
-        funding_payment = self.position["perp_quantity"] * current_perp * funding_rate
+        # Calculate funding payment - use the current perp price for funding
+        # Multiply by the funding periods multiplier for timeframe adjustment
+        funding_payment = (
+            self.position["perp_quantity"]
+            * current_perp
+            * funding_rate
+            * self.funding_periods_multiplier
+        )
 
         # Calculate notional values
         current_spot_notional = self.position["spot_quantity"] * current_spot
