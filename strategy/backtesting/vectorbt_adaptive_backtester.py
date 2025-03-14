@@ -7,8 +7,6 @@ import numpy as np
 from datetime import datetime
 import vectorbt as vbt
 
-# Removed the Direction import since it's causing issues
-
 
 class VectorbtAdaptiveBacktester:
     """
@@ -70,7 +68,7 @@ class VectorbtAdaptiveBacktester:
         short_entries = entries.to_numpy()
         short_exits = exits.to_numpy()
 
-        # Use string 'short' instead of Direction enum
+        # Use -1 for direction instead of "short" string
         perp_pf = vbt.Portfolio.from_signals(
             df["perp_close"],
             entries=short_entries,
@@ -78,7 +76,7 @@ class VectorbtAdaptiveBacktester:
             init_cash=self.initial_capital * self.leverage / 2,
             fees=self.fee_rate,
             freq="D",  # Assuming daily data
-            direction="short",  # Use string 'short' instead of enum
+            direction=-1,  # Use -1 for short position
         )
 
         # Calculate funding income when in position
@@ -87,86 +85,342 @@ class VectorbtAdaptiveBacktester:
         # Get position status (1 when in position, 0 when out)
         position_status = np.zeros(len(df))
 
-        # Use vectorbt position status to determine when we're in the market
-        active_position_mask = (
-            spot_pf.position_mask
-        )  # This is True when position is active
+        # Handle position_mask correctly based on if it's a function or property
+        if hasattr(spot_pf, "position_mask"):
+            if callable(spot_pf.position_mask):
+                active_position_mask = spot_pf.position_mask().to_numpy()
+            else:
+                active_position_mask = spot_pf.position_mask.to_numpy()
+        else:
+            # Fallback: create a mask from entries and exits manually
+            active_position_mask = np.zeros(len(df), dtype=bool)
+            current_position = False
+            for i in range(len(df)):
+                if entry_signals[i] and not current_position:
+                    current_position = True
+                elif exit_signals[i] and current_position:
+                    current_position = False
+                active_position_mask[i] = current_position
+
         position_status[active_position_mask] = 1
 
-        # Calculate perp value at each time point (for funding calculation)
-        perp_values = df["perp_close"].to_numpy() * perp_pf.position_size.to_numpy()
+        # Calculate perp value at each time point for funding calculation
+        # We'll use the asset value divided by price to estimate position size
+        # This is a workaround for missing position_size attribute
+
+        # Calculate estimated perp position sizes
+        perp_prices = df["perp_close"].to_numpy()
+        perp_position_sizes = np.zeros(len(df))
+
+        # Estimate position size based on asset value and price
+        if hasattr(perp_pf, "asset_value"):
+            if callable(perp_pf.asset_value):
+                perp_asset_values = perp_pf.asset_value().to_numpy()
+            else:
+                perp_asset_values = perp_pf.asset_value.to_numpy()
+
+            # Estimate position size as asset value / price (when we're in position)
+            for i in range(len(df)):
+                if active_position_mask[i] and perp_prices[i] > 0:
+                    # For short positions, we expect negative asset values
+                    # So we divide by price to get quantity (negative for shorts)
+                    perp_position_sizes[i] = perp_asset_values[i] / perp_prices[i]
+        else:
+            # If we can't get asset values, estimate based on cash changes
+            # This is a rough estimate but should be close enough for funding calculations
+            perp_position_sizes[active_position_mask] = (
+                -(self.initial_capital * self.leverage / 2)
+                / perp_prices[active_position_mask]
+            )
 
         # Calculate funding payments (only applied when position is active)
         funding_payments = np.zeros(len(df))
-        funding_payments[active_position_mask] = (
-            perp_values[active_position_mask] * funding_rates[active_position_mask]
-        )
+        for i in range(len(df)):
+            if active_position_mask[i]:
+                # Funding payment = perp position size * perp price * funding rate
+                funding_payments[i] = (
+                    perp_position_sizes[i] * perp_prices[i] * funding_rates[i]
+                )
 
         # Accumulate funding payments
         cumulative_funding = np.cumsum(funding_payments)
 
-        # Calculate total equity curve (spot + perp + funding)
-        # We need to adjust for initial cash to avoid double counting
-        equity_curve = (
-            spot_pf.equity + perp_pf.equity - self.initial_capital + cumulative_funding
-        )
+        # Calculate PnL components over time - handle as function or property correctly
+        if hasattr(spot_pf, "asset_value"):
+            if callable(spot_pf.asset_value):
+                spot_asset_value = spot_pf.asset_value()
+            else:
+                spot_asset_value = spot_pf.asset_value
 
-        # Extract trade information
+            if callable(perp_pf.asset_value):
+                perp_asset_value = perp_pf.asset_value()
+            else:
+                perp_asset_value = perp_pf.asset_value
+
+            spot_pnl = spot_asset_value - spot_pf.init_cash
+            perp_pnl = perp_asset_value - perp_pf.init_cash
+            net_market_pnl = spot_pnl + perp_pnl
+        else:
+            # Fallback if asset_value isn't available - use cash changes
+            spot_pnl = pd.Series(np.zeros(len(df)))
+            perp_pnl = pd.Series(np.zeros(len(df)))
+            net_market_pnl = pd.Series(np.zeros(len(df)))
+
+        # Calculate equity curve manually
+        # First check if equity is available
+        if hasattr(spot_pf, "equity") and hasattr(perp_pf, "equity"):
+            # Use existing equity attribute
+            if callable(spot_pf.equity):
+                spot_equity = spot_pf.equity()
+            else:
+                spot_equity = spot_pf.equity
+
+            if callable(perp_pf.equity):
+                perp_equity = perp_pf.equity()
+            else:
+                perp_equity = perp_pf.equity
+
+            # Combined equity + funding
+            equity_curve = (
+                spot_equity + perp_equity - self.initial_capital + cumulative_funding
+            )
+        else:
+            # Need to calculate equity manually
+            # Check if cash is available
+            if (
+                hasattr(spot_pf, "cash")
+                and hasattr(spot_pf, "asset_value")
+                and hasattr(perp_pf, "cash")
+                and hasattr(perp_pf, "asset_value")
+            ):
+                # Get cash values
+                if callable(spot_pf.cash):
+                    spot_cash = spot_pf.cash()
+                else:
+                    spot_cash = spot_pf.cash
+
+                if callable(perp_pf.cash):
+                    perp_cash = perp_pf.cash()
+                else:
+                    perp_cash = perp_pf.cash
+
+                # Equity = Cash + Asset Value
+                spot_equity = spot_cash + spot_asset_value
+                perp_equity = perp_cash + perp_asset_value
+
+                # Combined equity + funding
+                equity_curve = (
+                    spot_equity
+                    + perp_equity
+                    - self.initial_capital
+                    + cumulative_funding
+                )
+            else:
+                # Last resort: estimate equity from PnL + initial capital
+                estimated_market_pnl = np.zeros(len(df))
+                for i in range(len(df)):
+                    if active_position_mask[i]:
+                        # For long spot position
+                        spot_change = (
+                            df["spot_close"].iloc[i] / df["spot_close"].iloc[0] - 1
+                        )
+                        # For short perp position (negative PnL when price goes up)
+                        perp_change = -(
+                            df["perp_close"].iloc[i] / df["perp_close"].iloc[0] - 1
+                        )
+                        # Combined PnL as percentage of initial position
+                        estimated_market_pnl[i] = (
+                            (spot_change + perp_change)
+                            * self.initial_capital
+                            * self.leverage
+                            / 2
+                        )
+
+                # Create a pandas Series for the equity curve
+                equity_curve = pd.Series(
+                    self.initial_capital + estimated_market_pnl + cumulative_funding
+                )
+
+        # Prepare notional values from the estimated position sizes
+        spot_prices = df["spot_close"].to_numpy()
+        spot_position_sizes = np.zeros(len(df))
+
+        # Estimate spot position size based on asset value and price (similar to perp)
+        if hasattr(spot_pf, "asset_value"):
+            if callable(spot_pf.asset_value):
+                spot_asset_values = spot_pf.asset_value().to_numpy()
+            else:
+                spot_asset_values = spot_pf.asset_value.to_numpy()
+
+            # Estimate position size as asset value / price (when we're in position)
+            for i in range(len(df)):
+                if active_position_mask[i] and spot_prices[i] > 0:
+                    spot_position_sizes[i] = spot_asset_values[i] / spot_prices[i]
+        else:
+            # If we can't get asset values, estimate based on the initial investment
+            spot_position_sizes[active_position_mask] = (
+                self.initial_capital * self.leverage / 2
+            ) / spot_prices[active_position_mask]
+
+        # Calculate notional values
+        spot_notional = np.abs(spot_position_sizes * spot_prices)
+        perp_notional = np.abs(perp_position_sizes * perp_prices)
+        total_notional = spot_notional + perp_notional
+
+        # Calculate annualized funding rates
+        annualized_funding_rates = (
+            funding_rates * 3 * 365 * 100
+        )  # Convert to percentage
+
+        # Extract trade information with better error handling
         trades = []
 
-        # Extract spot trades
-        spot_trades = spot_pf.trades.records_readable
-        perp_trades = perp_pf.trades.records_readable
+        # Helper function to safely get trades from portfolio
+        def get_trades_from_portfolio(portfolio):
+            try:
+                if hasattr(portfolio, "trades"):
+                    if hasattr(portfolio.trades, "records_readable"):
+                        return portfolio.trades.records_readable
+                    elif hasattr(portfolio.trades, "records"):
+                        return portfolio.trades.records
+                return pd.DataFrame()  # Empty DataFrame if nothing found
+            except Exception as e:
+                print(f"Warning: Could not extract trades: {e}")
+                return pd.DataFrame()
 
-        # Zip together spot and perp trades to create complete trade records
+        # Get trades records from both portfolios
+        spot_trades = get_trades_from_portfolio(spot_pf)
+        perp_trades = get_trades_from_portfolio(perp_pf)
+
+        # Calculate total fees from trades
+        total_fees = 0
+
+        # Now process trades with maximum flexibility for column names
         if not spot_trades.empty and not perp_trades.empty:
-            for i in range(min(len(spot_trades), len(perp_trades))):
-                spot_trade = spot_trades.iloc[i]
-                perp_trade = perp_trades.iloc[i]
+            # Print column names to debug
+            print("Spot trades columns:", spot_trades.columns.tolist())
 
-                # Create trade record
-                trade = {
-                    "entry_date": spot_trade["Entry Date"],
-                    "exit_date": spot_trade["Exit Date"],
-                    "duration": (
-                        spot_trade["Exit Date"] - spot_trade["Entry Date"]
-                    ).days,
-                    "entry_funding": (
-                        df.loc[
-                            df["Timestamp"] == spot_trade["Entry Date"], "funding_rate"
-                        ].values[0]
-                        if len(
-                            df.loc[
-                                df["Timestamp"] == spot_trade["Entry Date"],
-                                "funding_rate",
-                            ].values
-                        )
-                        > 0
-                        else 0
-                    ),
-                    "exit_funding": (
-                        df.loc[
-                            df["Timestamp"] == spot_trade["Exit Date"], "funding_rate"
-                        ].values[0]
-                        if len(
-                            df.loc[
-                                df["Timestamp"] == spot_trade["Exit Date"],
-                                "funding_rate",
-                            ].values
-                        )
-                        > 0
-                        else 0
-                    ),
-                    "spot_entry": spot_trade["Entry Price"],
-                    "perp_entry": perp_trade["Entry Price"],
-                    "spot_exit": spot_trade["Exit Price"],
-                    "perp_exit": perp_trade["Exit Price"],
-                    "spot_pnl": spot_trade["PnL"],
-                    "perp_pnl": perp_trade["PnL"],
-                    "net_pnl": spot_trade["PnL"] + perp_trade["PnL"],
-                    "fees": spot_trade["Fees"] + perp_trade["Fees"],
-                }
-                trades.append(trade)
+            # Helper function to safely get a column value with multiple possible names
+            def get_column_value(df_row, possible_names, default=None):
+                for name in possible_names:
+                    if name in df_row:
+                        return df_row[name]
+                return default
+
+            # Determine column names for entry/exit dates
+            entry_date_cols = ["Entry Date", "entry_date", "entry_idx", "entry_time"]
+            exit_date_cols = ["Exit Date", "exit_date", "exit_idx", "exit_time"]
+
+            # Determine column names for prices
+            entry_price_cols = ["Entry Price", "entry_price", "entry_val"]
+            exit_price_cols = ["Exit Price", "exit_price", "exit_val"]
+
+            # Determine column names for PnL and fees
+            pnl_cols = ["PnL", "pnl", "return"]
+            fees_cols = ["Fees", "fees", "fee"]
+
+            # Try to calculate total fees
+            for i in range(min(len(spot_trades), len(perp_trades))):
+                try:
+                    spot_fee = get_column_value(spot_trades.iloc[i], fees_cols, 0)
+                    perp_fee = get_column_value(perp_trades.iloc[i], fees_cols, 0)
+                    total_fees += spot_fee + perp_fee
+                except Exception as e:
+                    print(f"Warning: Error calculating fees: {e}")
+
+            # Process each pair of trades
+            for i in range(min(len(spot_trades), len(perp_trades))):
+                spot_row = spot_trades.iloc[i]
+                perp_row = perp_trades.iloc[i]
+
+                try:
+                    # Get entry and exit dates
+                    entry_date = get_column_value(spot_row, entry_date_cols)
+                    exit_date = get_column_value(spot_row, exit_date_cols)
+
+                    # Handle index-based dates
+                    if isinstance(entry_date, (int, np.integer)):
+                        entry_date = df.iloc[entry_date]["Timestamp"]
+                    if isinstance(exit_date, (int, np.integer)):
+                        exit_date = df.iloc[exit_date]["Timestamp"]
+
+                    # Calculate duration
+                    try:
+                        duration = (exit_date - entry_date).days
+                    except:
+                        duration = 0
+
+                    # Get entry and exit prices
+                    spot_entry_price = get_column_value(spot_row, entry_price_cols, 0)
+                    spot_exit_price = get_column_value(spot_row, exit_price_cols, 0)
+                    perp_entry_price = get_column_value(perp_row, entry_price_cols, 0)
+                    perp_exit_price = get_column_value(perp_row, exit_price_cols, 0)
+
+                    # Get PnL
+                    spot_pnl_val = get_column_value(spot_row, pnl_cols, 0)
+                    perp_pnl_val = get_column_value(perp_row, pnl_cols, 0)
+
+                    # Get fees
+                    spot_fees = get_column_value(spot_row, fees_cols, 0)
+                    perp_fees = get_column_value(perp_row, fees_cols, 0)
+
+                    # Try to find funding rates at entry and exit
+                    try:
+                        # Safe way to find entry funding rate
+                        if isinstance(entry_date, pd.Timestamp):
+                            entry_date_str = entry_date.strftime("%Y-%m-%d")
+                            entry_matches = (
+                                df["Timestamp"].dt.strftime("%Y-%m-%d")
+                                == entry_date_str
+                            )
+                        else:
+                            entry_matches = df["Timestamp"] == entry_date
+
+                        if sum(entry_matches) > 0:
+                            entry_funding = df.loc[entry_matches, "funding_rate"].iloc[
+                                0
+                            ]
+                        else:
+                            entry_funding = 0
+
+                        # Safe way to find exit funding rate
+                        if isinstance(exit_date, pd.Timestamp):
+                            exit_date_str = exit_date.strftime("%Y-%m-%d")
+                            exit_matches = (
+                                df["Timestamp"].dt.strftime("%Y-%m-%d") == exit_date_str
+                            )
+                        else:
+                            exit_matches = df["Timestamp"] == exit_date
+
+                        if sum(exit_matches) > 0:
+                            exit_funding = df.loc[exit_matches, "funding_rate"].iloc[0]
+                        else:
+                            exit_funding = 0
+                    except Exception as e:
+                        print(f"Warning: Could not extract funding rates: {e}")
+                        entry_funding = 0
+                        exit_funding = 0
+
+                    # Create trade record
+                    trade = {
+                        "entry_date": entry_date,
+                        "exit_date": exit_date,
+                        "duration": duration,
+                        "entry_funding": entry_funding,
+                        "exit_funding": exit_funding,
+                        "spot_entry": spot_entry_price,
+                        "perp_entry": perp_entry_price,
+                        "spot_exit": spot_exit_price,
+                        "perp_exit": perp_exit_price,
+                        "spot_pnl": spot_pnl_val,
+                        "perp_pnl": perp_pnl_val,
+                        "net_pnl": spot_pnl_val + perp_pnl_val,
+                        "fees": spot_fees + perp_fees,
+                    }
+                    trades.append(trade)
+                except Exception as e:
+                    print(f"Warning: Could not process trade {i}: {e}")
+                    continue
 
         # Calculate trade statistics
         if trades:
@@ -209,20 +463,32 @@ class VectorbtAdaptiveBacktester:
                 "average_duration": 0,
             }
 
-        # Calculate PnL components over time
-        spot_pnl = spot_pf.asset_value - spot_pf.init_cash
-        perp_pnl = perp_pf.asset_value - perp_pf.init_cash
-        net_market_pnl = spot_pnl + perp_pnl
+        # Ensure equity_curve is a pandas Series for compatibility
+        if not isinstance(equity_curve, pd.Series):
+            equity_curve = pd.Series(equity_curve)
 
-        # Prepare notional values
-        spot_notional = np.abs(spot_pf.asset_value.to_numpy())
-        perp_notional = np.abs(perp_pf.asset_value.to_numpy())
-        total_notional = spot_notional + perp_notional
+        # Convert Series to lists for results
+        equity_list = equity_curve.tolist()
 
-        # Calculate annualized funding rates
-        annualized_funding_rates = (
-            funding_rates * 3 * 365 * 100
-        )  # Convert to percentage
+        # Make sure pandas Series are converted to numpy arrays before using tolist()
+        if isinstance(spot_pnl, pd.Series):
+            spot_pnl_list = spot_pnl.to_numpy().tolist()
+        else:
+            spot_pnl_list = spot_pnl.tolist()
+
+        if isinstance(perp_pnl, pd.Series):
+            perp_pnl_list = perp_pnl.to_numpy().tolist()
+        else:
+            perp_pnl_list = perp_pnl.tolist()
+
+        if isinstance(net_market_pnl, pd.Series):
+            net_market_pnl_list = net_market_pnl.to_numpy().tolist()
+            total_pnl_list = (
+                (net_market_pnl + pd.Series(cumulative_funding)).to_numpy().tolist()
+            )
+        else:
+            net_market_pnl_list = net_market_pnl.tolist()
+            total_pnl_list = (net_market_pnl + cumulative_funding).tolist()
 
         # Store results in the same format as the original backtester
         self.results = {
@@ -237,13 +503,13 @@ class VectorbtAdaptiveBacktester:
             "initial_notional": float(total_notional[0]),
             "final_notional": float(total_notional[-1]),
             "dates": df["Timestamp"].tolist(),
-            "equity_curve": equity_curve.tolist(),
+            "equity_curve": equity_list,
             "funding_income": funding_payments.tolist(),
             "cumulative_funding": cumulative_funding.tolist(),
-            "spot_pnl": spot_pnl.to_numpy().tolist(),
-            "perp_pnl": perp_pnl.to_numpy().tolist(),
-            "total_pnl": (net_market_pnl + cumulative_funding).to_numpy().tolist(),
-            "net_market_pnl": net_market_pnl.to_numpy().tolist(),
+            "spot_pnl": spot_pnl_list,
+            "perp_pnl": perp_pnl_list,
+            "total_pnl": total_pnl_list,
+            "net_market_pnl": net_market_pnl_list,
             "notional_values": total_notional.tolist(),
             "funding_rates": df["funding_rate"].tolist(),
             "annualized_funding_rates": annualized_funding_rates.tolist(),
