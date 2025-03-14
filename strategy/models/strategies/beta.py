@@ -9,11 +9,10 @@ import numpy as np
 import pandas as pd
 from typing import Dict, List, Any, Optional
 
-from ..base.base_strategy import BaseStrategy
+from ..base.base_strategy import BaseStrategy, StrategyContext
 from ..base.signals import EntrySignal, ExitSignal
 from ..base.position_sizer import PositionSizer
 from ..base.risk_manager import RiskManager
-from ..builder.strategy_builder import StrategyContext
 
 
 class BetaStrategy(BaseStrategy):
