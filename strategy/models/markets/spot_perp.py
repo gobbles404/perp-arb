@@ -350,13 +350,13 @@ class SpotPerpMarket:
 
     def calculate_pnl(self, data_row: pd.Series) -> Dict[str, Any]:
         """
-        Calculate PnL for the current position.
+        Calculate PnL for the current position with enhanced risk metrics.
 
         Args:
             data_row: Current market data row
 
         Returns:
-            Dictionary with PnL components
+            Dictionary with PnL components and risk metrics
         """
         # Initialize result
         result = {
@@ -412,7 +412,41 @@ class SpotPerpMarket:
             total_notional / current_equity if current_equity > 0 else 0
         )
 
-        # Update result
+        # Calculate risk metrics
+
+        # 1. Calculate maintenance margin requirement
+        maint_margin_requirement = perp_notional * (self.maint_margin_pct / 100)
+
+        # 2. Calculate health factor
+        health_factor = (
+            current_equity / maint_margin_requirement
+            if maint_margin_requirement > 0
+            else float("inf")
+        )
+
+        # 3. Determine risk level
+        if health_factor >= 3:
+            risk_level = "Very Safe"
+        elif health_factor >= 1.5:
+            risk_level = "Moderate Risk"
+        elif health_factor >= 1:
+            risk_level = "High Risk"
+        else:
+            risk_level = "Liquidation Imminent"
+
+        # 4. Calculate liquidation price (for short perp position)
+        # This is simplified - a more complex calculation would account for the spot position
+        liquidation_price = self.perp_entry_price * (
+            1 + (self.maint_margin_pct / 100) / self.perp_leverage
+        )
+
+        # 5. Calculate buffer to liquidation
+        buffer_to_liquidation = ((liquidation_price - perp_price) / perp_price) * 100
+
+        # 6. Calculate basis between spot and perp
+        current_basis_pct = ((perp_price / spot_price) - 1) * 100
+
+        # Update result with all metrics
         result.update(
             {
                 "spot_pnl": spot_pnl,
@@ -424,6 +458,13 @@ class SpotPerpMarket:
                 "equity": current_equity,
                 "current_perp_leverage": current_perp_leverage,
                 "current_portfolio_leverage": current_portfolio_leverage,
+                # Risk metrics
+                "health_factor": health_factor,
+                "risk_level": risk_level,
+                "maint_margin_requirement": maint_margin_requirement,
+                "liquidation_price": liquidation_price,
+                "buffer_to_liquidation_pct": buffer_to_liquidation,
+                "current_basis_pct": current_basis_pct,
             }
         )
 
@@ -530,3 +571,263 @@ class SpotPerpMarket:
             "spot_allocation": self.spot_allocation,
             "perp_allocation": self.perp_allocation,
         }
+
+
+# Add these methods to the SpotPerpMarket class
+
+
+def calculate_liquidation_price(self):
+    """
+    Calculate the price at which the position would be liquidated.
+
+    For a delta-neutral spot-perp position, liquidation occurs when:
+    - The perp position loses enough value that maintenance margin is breached
+    - The combined equity (accounting for spot profit) falls below maintenance requirement
+
+    Returns:
+        Dict with liquidation details
+    """
+    if not self.is_position_open or self.perp_quantity == 0:
+        return {
+            "liquidation_price": None,
+            "upside_liquidation": None,
+            "downside_liquidation": None,
+            "current_price": None,
+            "buffer_percentage": None,
+        }
+
+    # Get current prices
+    current_spot_price = self.data.iloc[-1]["spot_close"]
+    current_perp_price = self.data.iloc[-1]["perp_close"]
+
+    # Calculate initial position details
+    initial_perp_notional = self.perp_quantity * self.perp_entry_price
+    initial_spot_notional = self.spot_quantity * self.spot_entry_price
+
+    # Calculate maintenance margin requirement
+    maint_margin_requirement = initial_perp_notional * (self.maint_margin_pct / 100)
+
+    # For a short perp position, liquidation occurs at higher prices
+    # We need to consider the spot profit offsetting perp losses
+
+    # Calculate upside liquidation (price increase)
+    # At what price would the perp loss exceed: perp_allocation + spot_profit - maintenance_margin?
+    # This is complex because spot profit offsets perp losses
+
+    # Downside liquidation is less likely (perp profits when price falls)
+    # But could happen in extreme basis expansion scenarios
+
+    # Simplified calculation for short perp: at what price do we get liquidated?
+    # liquidation_price = entry_price * (1 + (maintenance_margin_pct / perp_leverage))
+    liquidation_price = self.perp_entry_price * (
+        1 + (self.maint_margin_pct / 100) / self.perp_leverage
+    )
+
+    # For more accuracy, we need to account for spot position offsetting losses
+    # This is more complex and would involve solving an equation
+
+    # Calculate buffer to liquidation (as percentage)
+    buffer_percentage = (
+        abs(liquidation_price - current_perp_price) / current_perp_price
+    ) * 100
+
+    return {
+        "liquidation_price": liquidation_price,
+        "current_price": current_perp_price,
+        "buffer_percentage": buffer_percentage,
+        "maintenance_margin_pct": self.maint_margin_pct,
+    }
+
+
+def calculate_health_factor(self):
+    """
+    Calculate the current health factor of the position.
+
+    Health factor = Current Equity / Maintenance Margin Requirement
+
+    Returns:
+        Dict with health metrics
+    """
+    if not self.is_position_open:
+        return {"health_factor": None, "risk_level": "No Position"}
+
+    # Get current prices
+    current_spot_price = self.data.iloc[-1]["spot_close"]
+    current_perp_price = self.data.iloc[-1]["perp_close"]
+
+    # Calculate current notional values
+    current_spot_notional = self.spot_quantity * current_spot_price
+    current_perp_notional = self.perp_quantity * current_perp_price
+
+    # Calculate PnL
+    spot_pnl = self.spot_quantity * (current_spot_price - self.spot_entry_price)
+    perp_pnl = self.perp_quantity * (self.perp_entry_price - current_perp_price)
+    net_pnl = spot_pnl + perp_pnl
+
+    # Calculate current equity
+    current_equity = self.spot_allocation + self.perp_allocation + net_pnl
+
+    # Calculate maintenance margin requirement
+    maint_margin_requirement = current_perp_notional * (self.maint_margin_pct / 100)
+
+    # Calculate health factor
+    health_factor = (
+        current_equity / maint_margin_requirement
+        if maint_margin_requirement > 0
+        else float("inf")
+    )
+
+    # Determine risk level
+    risk_level = "Unknown"
+    if health_factor >= 3:
+        risk_level = "Very Safe"
+    elif health_factor >= 1.5:
+        risk_level = "Moderate Risk"
+    elif health_factor >= 1:
+        risk_level = "High Risk"
+    else:
+        risk_level = "Liquidation Imminent"
+
+    return {
+        "health_factor": health_factor,
+        "risk_level": risk_level,
+        "current_equity": current_equity,
+        "maintenance_requirement": maint_margin_requirement,
+        "net_pnl": net_pnl,
+        "spot_pnl": spot_pnl,
+        "perp_pnl": perp_pnl,
+    }
+
+
+def calculate_stress_test(self, price_change_pct=10):
+    """
+    Conduct a stress test on the current position.
+
+    Simulates position performance under various market scenarios.
+
+    Args:
+        price_change_pct: Percentage price change to simulate (both up and down)
+
+    Returns:
+        Dict with stress test results
+    """
+    if not self.is_position_open:
+        return {"status": "No position open"}
+
+    # Get current prices
+    current_spot_price = self.data.iloc[-1]["spot_close"]
+    current_perp_price = self.data.iloc[-1]["perp_close"]
+
+    # Calculate current basis
+    current_basis_pct = ((current_perp_price / current_spot_price) - 1) * 100
+
+    # Simulate price increases
+    upside_scenarios = []
+    for pct in [5, 10, 20, 50]:
+        # Calculate new prices
+        new_spot_price = current_spot_price * (1 + pct / 100)
+        new_perp_price = current_perp_price * (1 + pct / 100)
+
+        # Calculate PnL
+        spot_pnl = self.spot_quantity * (new_spot_price - self.spot_entry_price)
+        perp_pnl = self.perp_quantity * (self.perp_entry_price - new_perp_price)
+        net_pnl = spot_pnl + perp_pnl
+
+        # Calculate new equity
+        new_equity = self.spot_allocation + self.perp_allocation + net_pnl
+
+        # Calculate new health factor
+        new_perp_notional = self.perp_quantity * new_perp_price
+        new_maint_margin = new_perp_notional * (self.maint_margin_pct / 100)
+        health_factor = (
+            new_equity / new_maint_margin if new_maint_margin > 0 else float("inf")
+        )
+
+        upside_scenarios.append(
+            {
+                "price_change_pct": pct,
+                "spot_price": new_spot_price,
+                "perp_price": new_perp_price,
+                "spot_pnl": spot_pnl,
+                "perp_pnl": perp_pnl,
+                "net_pnl": net_pnl,
+                "health_factor": health_factor,
+                "liquidation": health_factor < 1,
+            }
+        )
+
+    # Simulate price decreases
+    downside_scenarios = []
+    for pct in [5, 10, 20, 50]:
+        # Calculate new prices
+        new_spot_price = current_spot_price * (1 - pct / 100)
+        new_perp_price = current_perp_price * (1 - pct / 100)
+
+        # Calculate PnL
+        spot_pnl = self.spot_quantity * (new_spot_price - self.spot_entry_price)
+        perp_pnl = self.perp_quantity * (self.perp_entry_price - new_perp_price)
+        net_pnl = spot_pnl + perp_pnl
+
+        # Calculate new equity
+        new_equity = self.spot_allocation + self.perp_allocation + net_pnl
+
+        # Calculate new health factor
+        new_perp_notional = self.perp_quantity * new_perp_price
+        new_maint_margin = new_perp_notional * (self.maint_margin_pct / 100)
+        health_factor = (
+            new_equity / new_maint_margin if new_maint_margin > 0 else float("inf")
+        )
+
+        downside_scenarios.append(
+            {
+                "price_change_pct": -pct,
+                "spot_price": new_spot_price,
+                "perp_price": new_perp_price,
+                "spot_pnl": spot_pnl,
+                "perp_pnl": perp_pnl,
+                "net_pnl": net_pnl,
+                "health_factor": health_factor,
+                "liquidation": health_factor < 1,
+            }
+        )
+
+    # Basis expansion scenarios (perp price increases more than spot)
+    basis_expansion_scenarios = []
+    for basis_change in [1, 2, 5, 10]:
+        # Calculate new perp price with expanded basis
+        new_basis_pct = current_basis_pct + basis_change
+        new_perp_price = current_spot_price * (1 + new_basis_pct / 100)
+
+        # Calculate PnL
+        spot_pnl = 0  # Spot price unchanged
+        perp_pnl = self.perp_quantity * (self.perp_entry_price - new_perp_price)
+        net_pnl = perp_pnl  # No spot PnL
+
+        # Calculate new equity
+        new_equity = self.spot_allocation + self.perp_allocation + net_pnl
+
+        # Calculate new health factor
+        new_perp_notional = self.perp_quantity * new_perp_price
+        new_maint_margin = new_perp_notional * (self.maint_margin_pct / 100)
+        health_factor = (
+            new_equity / new_maint_margin if new_maint_margin > 0 else float("inf")
+        )
+
+        basis_expansion_scenarios.append(
+            {
+                "basis_change_pct": basis_change,
+                "new_basis_pct": new_basis_pct,
+                "perp_price": new_perp_price,
+                "perp_pnl": perp_pnl,
+                "health_factor": health_factor,
+                "liquidation": health_factor < 1,
+            }
+        )
+
+    return {
+        "current_basis_pct": current_basis_pct,
+        "current_health": self.calculate_health_factor(),
+        "upside_scenarios": upside_scenarios,
+        "downside_scenarios": downside_scenarios,
+        "basis_expansion_scenarios": basis_expansion_scenarios,
+    }

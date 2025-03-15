@@ -20,7 +20,11 @@ from models.base.signals import FundingRateSignal
 from models.base.position_sizer import EqualNotionalSizer
 from backtesting.vectorbt_backtester import VectorbtBacktester
 from analytics.metrics import calculate_performance_metrics, print_performance_summary
-from analytics.visualizations import create_performance_charts
+from analytics.visualizations import (
+    create_performance_charts,
+    create_risk_dashboard,
+    print_risk_summary,
+)
 from models.markets.spot_perp import SpotPerpMarket
 
 
@@ -196,6 +200,8 @@ def main():
             print("Generating visualization charts...")
             try:
                 create_performance_charts(results, metrics, args.output_dir)
+                create_risk_dashboard(results, metrics, args.output_dir)
+                print_risk_summary(results)
             except Exception as e:
                 print(f"Error creating charts: {str(e)}")
 

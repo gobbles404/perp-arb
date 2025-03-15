@@ -1,5 +1,6 @@
 """
 Backtesting engine for trading strategies using vectorbt.
+Enhanced with risk monitoring capabilities.
 """
 
 import pandas as pd
@@ -12,6 +13,7 @@ class VectorbtBacktester:
     """
     Class for backtesting a strategy on historical data using vectorbt.
     Maintains the same interface as the original Backtester for compatibility.
+    Enhanced with risk monitoring metrics.
     """
 
     def __init__(
@@ -34,8 +36,31 @@ class VectorbtBacktester:
         self.fee_rate = fee_rate
         self.results = None
 
+        # Extract margin requirements from data if available
+        self.maint_margin_pct = self._get_maint_margin_pct()
+        self.initial_margin_pct = self._get_initial_margin_pct()
+        self.liquidation_fee_pct = self._get_liquidation_fee_pct()
+
+    def _get_maint_margin_pct(self):
+        """Extract maintenance margin percentage from data."""
+        if "perpetual_maint" in self.data.columns:
+            return self.data["perpetual_maint"].iloc[0]
+        return 2.5  # Default value of 2.5%
+
+    def _get_initial_margin_pct(self):
+        """Extract initial margin percentage from data."""
+        if "perpetual_initial" in self.data.columns:
+            return self.data["perpetual_initial"].iloc[0]
+        return 5.0  # Default value of 5.0%
+
+    def _get_liquidation_fee_pct(self):
+        """Extract liquidation fee percentage from data."""
+        if "perpetual_liquidation_fee" in self.data.columns:
+            return self.data["perpetual_liquidation_fee"].iloc[0]
+        return 0.5  # Default value of 0.5%
+
     def run(self):
-        """Run the backtest using vectorbt and return results."""
+        """Run the backtest using vectorbt and return results with risk metrics."""
         if len(self.data) < 2:
             print("Error: Insufficient data points for backtest")
             return None
@@ -101,7 +126,62 @@ class VectorbtBacktester:
         # Calculate annualized funding rates
         annualized_funding_rates = funding_rate * 3 * 365 * 100  # Convert to percentage
 
-        # Store results in the same format as the original backtester
+        # ----- RISK METRICS CALCULATION -----
+
+        # Arrays to store risk metrics
+        health_factors = []
+        liquidation_prices = []
+        buffer_percentages = []
+        basis_percentages = []
+
+        # Calculate risk metrics for each time step
+        for i in range(len(dates)):
+            # Calculate current equity
+            current_equity = self.initial_capital + total_pnl[i] - entry_fee
+
+            # Calculate maintenance margin requirement
+            current_perp_notional = perp_notional[i]
+            maint_margin_requirement = current_perp_notional * (
+                self.maint_margin_pct / 100
+            )
+
+            # Calculate health factor
+            health_factor = (
+                current_equity / maint_margin_requirement
+                if maint_margin_requirement > 0
+                else float("inf")
+            )
+            health_factors.append(health_factor)
+
+            # Calculate liquidation price for short perp position
+            # Liquidation occurs when: equity <= maintenance margin
+            # For a short position, price increase leads to losses
+            liquidation_price = perp_price[0] * (
+                1 + (self.maint_margin_pct / 100) / self.leverage
+            )
+            liquidation_prices.append(liquidation_price)
+
+            # Calculate buffer to liquidation (as percentage)
+            buffer_pct = (
+                ((liquidation_price - perp_price[i]) / perp_price[i]) * 100
+                if perp_price[i] > 0
+                else 0
+            )
+            buffer_percentages.append(buffer_pct)
+
+            # Calculate current basis between spot and perp
+            basis_pct = (
+                ((perp_price[i] / spot_price[i]) - 1) * 100 if spot_price[i] > 0 else 0
+            )
+            basis_percentages.append(basis_pct)
+
+        # Find times when health factor approached danger level
+        close_calls = sum(1 for hf in health_factors if hf is not None and hf < 1.2)
+
+        # Find minimum health factor
+        min_health = min([h for h in health_factors if h is not None], default=None)
+
+        # Store results in the same format as the original backtester with added risk metrics
         self.results = {
             "entry_date": dates[0],
             "exit_date": dates[-1],
@@ -129,6 +209,19 @@ class VectorbtBacktester:
             "funding_rates": funding_rate.tolist(),
             "annualized_funding_rates": annualized_funding_rates.tolist(),
             "data": self.data,
+            # Risk metrics
+            "health_factors": health_factors,
+            "liquidation_prices": liquidation_prices,
+            "buffer_percentages": buffer_percentages,
+            "basis_percentages": basis_percentages,
+            "latest_health_factor": health_factors[-1] if health_factors else None,
+            "latest_liquidation_price": (
+                liquidation_prices[-1] if liquidation_prices else None
+            ),
+            "min_health_factor": min_health,
+            "close_calls": close_calls,
+            "maintenance_margin_pct": self.maint_margin_pct,
+            "initial_margin_pct": self.initial_margin_pct,
         }
 
         # Add vectorbt portfolio object for additional analysis if needed

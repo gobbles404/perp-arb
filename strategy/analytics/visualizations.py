@@ -388,3 +388,292 @@ def plot_basis_funding_time_series(ax, data):
     ax.legend(lines1 + lines2, labels1 + labels2, loc="lower right")
 
     ax.grid(True)
+
+
+# Add to analytics/visualizations.py
+
+
+def plot_health_factor_over_time(ax, health_factors, dates):
+    """
+    Plot health factor evolution over the backtest period.
+
+    Args:
+        ax: Matplotlib axes object
+        health_factors: List of health factor values
+        dates: List of corresponding dates
+    """
+    # Create color mapping
+    colors = []
+    for hf in health_factors:
+        if hf is None:
+            colors.append("gray")
+        elif hf >= 3:
+            colors.append("green")
+        elif hf >= 1.5:
+            colors.append("yellow")
+        elif hf >= 1:
+            colors.append("orange")
+        else:
+            colors.append("red")
+
+    # Plot health factor
+    ax.scatter(dates, health_factors, c=colors, alpha=0.7)
+    ax.plot(dates, health_factors, "k-", alpha=0.3)
+
+    # Add threshold lines
+    ax.axhline(y=3, color="green", linestyle="--", alpha=0.5, label="Very Safe (3.0+)")
+    ax.axhline(
+        y=1.5,
+        color="yellow",
+        linestyle="--",
+        alpha=0.5,
+        label="Moderate Risk (1.5-3.0)",
+    )
+    ax.axhline(
+        y=1, color="red", linestyle="--", alpha=0.5, label="Liquidation Threshold (1.0)"
+    )
+
+    # Set labels and title
+    ax.set_title("Position Health Factor Over Time")
+    ax.set_ylabel("Health Factor")
+    ax.set_ylim(bottom=0)  # Start y-axis at 0
+    ax.grid(True)
+    ax.legend()
+
+
+def plot_liquidation_buffer(ax, prices, liquidation_prices, dates):
+    """
+    Plot price and liquidation threshold over time.
+
+    Args:
+        ax: Matplotlib axes object
+        prices: List of perp prices
+        liquidation_prices: List of calculated liquidation prices
+        dates: List of corresponding dates
+    """
+    # Plot price and liquidation price
+    ax.plot(dates, prices, "b-", label="Perp Price")
+    ax.plot(dates, liquidation_prices, "r-", alpha=0.7, label="Liquidation Threshold")
+
+    # Fill the buffer area
+    ax.fill_between(
+        dates,
+        prices,
+        liquidation_prices,
+        where=(prices < liquidation_prices),
+        color="green",
+        alpha=0.2,
+        label="Safety Buffer",
+    )
+
+    # Highlight danger zones
+    buffer_pcts = [
+        (liq - price) / price * 100 if price > 0 and liq is not None else None
+        for price, liq in zip(prices, liquidation_prices)
+    ]
+
+    danger_dates = []
+    danger_prices = []
+
+    for i, pct in enumerate(buffer_pcts):
+        if pct is not None and pct < 10:  # Less than 10% buffer
+            danger_dates.append(dates[i])
+            danger_prices.append(prices[i])
+
+    if danger_dates:
+        ax.scatter(
+            danger_dates,
+            danger_prices,
+            color="red",
+            s=50,
+            alpha=0.7,
+            label="Danger Zone (<10% Buffer)",
+        )
+
+    # Set labels and title
+    ax.set_title("Price vs Liquidation Threshold")
+    ax.set_ylabel("Price")
+    ax.grid(True)
+    ax.legend()
+
+
+def create_risk_dashboard(results, metrics, output_dir="strategy/results"):
+    """
+    Generate a comprehensive risk dashboard.
+
+    Args:
+        results: Backtest results dictionary
+        metrics: Calculated performance metrics
+        output_dir: Output directory for the dashboard
+    """
+    import matplotlib.pyplot as plt
+    import os
+    from datetime import datetime
+
+    # Skip if no risk metrics available
+    if "health_factors" not in results:
+        print("Risk metrics not available - cannot create risk dashboard")
+        return
+
+    # Create output directory if it doesn't exist
+    os.makedirs(output_dir, exist_ok=True)
+    timestamp = datetime.now().strftime("%Y%m%d%H%M%S")
+
+    # Prepare data
+    dates = results["dates"]
+    health_factors = results.get("health_factors", [])
+
+    # Get perp prices either from data or from the perp_close list if available
+    if "data" in results and "perp_close" in results["data"]:
+        perp_prices = results["data"]["perp_close"].values
+    else:
+        # Try to reconstruct from entry/exit prices
+        perp_entry = results.get("perp_entry", 0)
+        perp_exit = results.get("perp_exit", 0)
+        # Create a linear interpolation between entry and exit prices
+        perp_prices = np.linspace(perp_entry, perp_exit, len(dates))
+
+    liquidation_prices = results.get("liquidation_prices", [])
+
+    # Create figure with multiple subplots
+    fig, axes = plt.subplots(
+        3, 1, figsize=(14, 18), gridspec_kw={"height_ratios": [2, 1.5, 1.5]}
+    )
+
+    # Plot main equity curve
+    plot_equity_curve(axes[0], results, metrics)
+
+    # Plot health factor over time
+    if health_factors:
+        plot_health_factor_over_time(axes[1], health_factors, dates)
+    else:
+        axes[1].text(
+            0.5,
+            0.5,
+            "Health factor data not available",
+            horizontalalignment="center",
+            verticalalignment="center",
+            transform=axes[1].transAxes,
+        )
+
+    # Plot liquidation buffer
+    if liquidation_prices and isinstance(perp_prices, (list, np.ndarray)):
+        plot_liquidation_buffer(axes[2], perp_prices, liquidation_prices, dates)
+    else:
+        axes[2].text(
+            0.5,
+            0.5,
+            "Liquidation price data not available",
+            horizontalalignment="center",
+            verticalalignment="center",
+            transform=axes[2].transAxes,
+        )
+
+    # Add a title for the entire dashboard
+    plt.suptitle("Funding Arbitrage Risk Dashboard", fontsize=16)
+
+    # Adjust layout and save
+    plt.tight_layout(rect=[0, 0, 1, 0.97])  # Make room for the suptitle
+    risk_dashboard_path = f"{output_dir}/risk_dashboard_{timestamp}.png"
+    plt.savefig(risk_dashboard_path)
+    plt.close(fig)
+
+    print(f"Risk dashboard saved to {risk_dashboard_path}")
+
+
+def print_risk_summary(results):
+    """
+    Print a summary of risk metrics.
+
+    Args:
+        results: Backtest results dictionary
+    """
+    print("\n=== RISK MANAGEMENT SUMMARY ===")
+
+    # Get latest risk data
+    latest_health = results.get("latest_health_factor", None)
+    liquidation_price = results.get("latest_liquidation_price", None)
+    current_price = (
+        results.get("data", {}).get("perp_close", {}).iloc[-1]
+        if "data" in results
+        else None
+    )
+
+    # Health factor summary
+    if latest_health:
+        print(f"Final Health Factor: {latest_health:.2f}")
+
+        if latest_health >= 3:
+            print("Risk Level: Very Safe (Health Factor >= 3)")
+        elif latest_health >= 1.5:
+            print("Risk Level: Moderate Risk (1.5 <= Health Factor < 3)")
+        elif latest_health >= 1:
+            print("Risk Level: High Risk (1 <= Health Factor < 1.5)")
+        else:
+            print("Risk Level: DANGER - Below Liquidation Threshold!")
+
+    # Liquidation buffer
+    if liquidation_price and current_price:
+        buffer_pct = (liquidation_price - current_price) / current_price * 100
+        print(f"Current Perp Price: ${current_price:.2f}")
+        print(f"Liquidation Threshold: ${liquidation_price:.2f}")
+        print(f"Buffer to Liquidation: {buffer_pct:.2f}%")
+
+        if buffer_pct >= 50:
+            print("Buffer Status: Very Large Buffer (>50%)")
+        elif buffer_pct >= 25:
+            print("Buffer Status: Healthy Buffer (25-50%)")
+        elif buffer_pct >= 10:
+            print("Buffer Status: Adequate Buffer (10-25%)")
+        elif buffer_pct > 0:
+            print("Buffer Status: CAUTION - Small Buffer (<10%)")
+        else:
+            print("Buffer Status: CRITICAL - No Buffer!")
+
+    # Risk events during backtest
+    close_calls = results.get("close_calls", 0)
+    if close_calls:
+        print(f"\nRisk Events During Backtest:")
+        print(f"  Near-Liquidation Events (Health Factor < 1.2): {close_calls}")
+
+    # Stress test summary
+    stress_test = results.get("latest_stress_test", None)
+    if stress_test:
+        print("\nStress Test Summary:")
+
+        # Price increase scenarios
+        up_scenarios = stress_test.get("upside_scenarios", [])
+        if up_scenarios:
+            max_safe_increase = None
+            for scenario in up_scenarios:
+                if not scenario.get("liquidation", False):
+                    max_safe_increase = scenario.get("price_change_pct", None)
+
+            if max_safe_increase is not None:
+                print(f"  Can withstand price increase of: {max_safe_increase}%")
+            else:
+                print("  Cannot withstand any significant price increase")
+
+        # Basis expansion scenarios
+        basis_scenarios = stress_test.get("basis_expansion_scenarios", [])
+        if basis_scenarios:
+            max_safe_basis = None
+            for scenario in basis_scenarios:
+                if not scenario.get("liquidation", False):
+                    max_safe_basis = scenario.get("basis_change_pct", None)
+
+            if max_safe_basis is not None:
+                print(f"  Can withstand basis expansion of: {max_safe_basis}%")
+            else:
+                print("  Cannot withstand any significant basis expansion")
+
+    print("\nRecommendations:")
+    if latest_health and latest_health < 1.5:
+        print("  - URGENT: Consider reducing leverage or position size")
+        print("  - Monitor position closely for adverse movements")
+    elif latest_health and latest_health < 3:
+        print("  - Consider setting stop-loss orders to protect capital")
+        print("  - Be prepared to exit if funding rates turn negative")
+    else:
+        print("  - Position appears safe under normal market conditions")
+        print("  - Continue to monitor for changes in market conditions")
