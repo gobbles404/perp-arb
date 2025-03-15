@@ -13,6 +13,7 @@ from ..base.base_strategy import BaseStrategy, StrategyContext
 from ..base.signals import EntrySignal, ExitSignal
 from ..base.position_sizer import PositionSizer
 from ..base.risk_manager import RiskManager
+from ..markets.spot_perp import SpotPerpMarket
 
 
 class BetaStrategy(BaseStrategy):
@@ -32,6 +33,7 @@ class BetaStrategy(BaseStrategy):
         position_sizer: Optional[PositionSizer] = None,
         risk_manager: Optional[RiskManager] = None,
         name: str = "BetaStrategy",
+        market: Optional[SpotPerpMarket] = None,
     ):
         """
         Initialize the Beta Strategy.
@@ -42,6 +44,7 @@ class BetaStrategy(BaseStrategy):
             position_sizer: Component that determines position sizes
             risk_manager: Component that enforces risk limits
             name: Strategy name
+            market: SpotPerpMarket instance (optional, created internally if not provided)
         """
         super().__init__(name=name)
 
@@ -50,6 +53,7 @@ class BetaStrategy(BaseStrategy):
         self.exit_signals = exit_signals or []
         self.position_sizer = position_sizer
         self.risk_manager = risk_manager
+        self.market = market
 
         # Track periods held and trade history
         self.periods_held = 0
@@ -79,6 +83,13 @@ class BetaStrategy(BaseStrategy):
         self.context = StrategyContext(data, current_index=0)
         first_row = data.iloc[0]
 
+        # Create market if not provided
+        if self.market is None:
+            self.market = SpotPerpMarket(
+                data=data, capital=capital, leverage=leverage, fee_rate=fee_rate
+            )
+            self.market.set_funding_periods_multiplier(self.funding_periods_multiplier)
+
         # Check if we should enter based on entry signals
         should_enter = True
         for signal in self.entry_signals:
@@ -86,80 +97,30 @@ class BetaStrategy(BaseStrategy):
                 should_enter = False
                 break
 
-        if not should_enter:
-            # Return empty position
-            return {
-                "entry_date": first_row["Timestamp"],
-                "spot_entry": first_row["spot_close"],
-                "perp_entry": first_row["perp_close"],
-                "spot_quantity": 0,
-                "perp_quantity": 0,
-                "capital": capital,
-                "entry_fee": 0,
-                "total_notional": 0,
-            }
-
-        # Calculate position sizes
-        if self.position_sizer:
-            position_sizes = self.position_sizer.calculate_position_size(
-                first_row, self.context, capital, leverage
-            )
-        else:
-            # Default position sizing - equal notional on both sides
-            position_size = capital * leverage / 2  # Split between spot and perp
-            spot_quantity = position_size / first_row["spot_close"]
-            perp_quantity = position_size / first_row["perp_close"]
-
-            position_sizes = {
-                "spot_quantity": spot_quantity,
-                "perp_quantity": perp_quantity,
-                "long_notional": spot_quantity * first_row["spot_close"],
-                "short_notional": perp_quantity * first_row["perp_close"],
-            }
-
-        # Apply risk management if configured
-        if self.risk_manager:
-            position_sizes = self.risk_manager.check_risk_limits(
-                position_sizes, first_row, self.context
-            )
-
-        # Calculate fees
-        entry_fee = (
-            position_sizes["long_notional"] + position_sizes["short_notional"]
-        ) * fee_rate
-        total_notional = (
-            position_sizes["long_notional"] + position_sizes["short_notional"]
-        )
+        # Initialize position through market
+        position = self.market.initialize_position(first_row, should_enter)
 
         # Update strategy state
-        self.is_position_open = True
-        self.periods_held = 1
+        self.is_position_open = self.market.is_position_open
+        self.periods_held = 1 if self.is_position_open else 0
 
-        # Record trade entry
-        self.current_trade = {
-            "entry_date": first_row["Timestamp"],
-            "spot_entry": first_row["spot_close"],
-            "perp_entry": first_row["perp_close"],
-            "spot_quantity": position_sizes["spot_quantity"],
-            "perp_quantity": position_sizes["perp_quantity"],
-            "entry_funding": first_row["funding_rate"],
-            "entry_capital": capital,
-            "fees": entry_fee,
-        }
+        # Record trade entry if position opened
+        if self.is_position_open:
+            self.current_trade = {
+                "entry_date": first_row["Timestamp"],
+                "spot_entry": position["spot_entry"],
+                "perp_entry": position["perp_entry"],
+                "spot_quantity": position["spot_quantity"],
+                "perp_quantity": position["perp_quantity"],
+                "entry_funding": first_row["funding_rate"],
+                "entry_capital": capital,
+                "fees": position["entry_fee"],
+            }
 
-        # Update position data
-        self.position = {
-            "entry_date": first_row["Timestamp"],
-            "spot_entry": first_row["spot_close"],
-            "perp_entry": first_row["perp_close"],
-            "spot_quantity": position_sizes["spot_quantity"],
-            "perp_quantity": position_sizes["perp_quantity"],
-            "capital": capital - entry_fee,
-            "entry_fee": entry_fee,
-            "total_notional": total_notional,
-        }
+        # Store the position for backward compatibility
+        self.position = position
 
-        return self.position
+        return position
 
     def calculate_pnl(self, data_row: pd.Series) -> Dict[str, Any]:
         """
@@ -175,49 +136,8 @@ class BetaStrategy(BaseStrategy):
         if self.context:
             self.context.current_index += 1
 
-        # Initialize result
-        result = {
-            "date": data_row["Timestamp"],
-            "spot_pnl": 0,
-            "perp_pnl": 0,
-            "funding_payment": 0,
-            "funding_rate": data_row["funding_rate"],
-            "should_exit": False,
-            "total_notional": 0,
-        }
-
-        # If no position is open, return empty result
-        if not self.is_position_open or self.position is None:
-            return result
-
-        # Get current prices
-        spot_price = data_row["spot_close"]
-        perp_price = data_row["perp_close"]
-        funding_rate = data_row["funding_rate"]
-
-        # Calculate PnL components
-        spot_pnl = self.position["spot_quantity"] * (
-            spot_price - self.position["spot_entry"]
-        )
-        perp_pnl = self.position["perp_quantity"] * (
-            self.position["perp_entry"] - perp_price
-        )
-
-        # Calculate funding payment
-        funding_payment = (
-            self.position["perp_quantity"]
-            * perp_price
-            * funding_rate
-            * self.funding_periods_multiplier
-        )
-
-        # Calculate total notional value
-        total_notional = (self.position["spot_quantity"] * spot_price) + (
-            self.position["perp_quantity"] * perp_price
-        )
-
-        # Update periods held
-        self.periods_held += 1
+        # Calculate PnL through market
+        result = self.market.calculate_pnl(data_row)
 
         # Check if we should exit based on exit signals
         should_exit = False
@@ -226,17 +146,12 @@ class BetaStrategy(BaseStrategy):
                 should_exit = True
                 break
 
-        # Update result
-        result.update(
-            {
-                "spot_pnl": spot_pnl,
-                "perp_pnl": perp_pnl,
-                "funding_payment": funding_payment,
-                "funding_rate": funding_rate,
-                "should_exit": should_exit,
-                "total_notional": total_notional,
-            }
-        )
+        # Update periods held
+        if self.is_position_open:
+            self.periods_held += 1
+
+        # Add exit signal to result
+        result["should_exit"] = should_exit
 
         return result
 
@@ -251,52 +166,26 @@ class BetaStrategy(BaseStrategy):
         Returns:
             Dict with position exit details
         """
-        # If no position is open, return empty result
-        if not self.is_position_open or self.position is None:
-            return {
-                "exit_date": data_row["Timestamp"],
-                "exit_spot": data_row["spot_close"],
-                "exit_perp": data_row["perp_close"],
-                "exit_fee": 0,
-                "final_total_notional": 0,
-            }
-
-        # Get exit prices
-        exit_spot = data_row["spot_close"]
-        exit_perp = data_row["perp_close"]
-
-        # Calculate final notional and fees
-        final_spot_notional = self.position["spot_quantity"] * exit_spot
-        final_perp_notional = self.position["perp_quantity"] * exit_perp
-        final_total_notional = final_spot_notional + final_perp_notional
-        exit_fee = final_total_notional * fee_rate
-
-        # Calculate PnLs for the trade
-        spot_pnl = self.position["spot_quantity"] * (
-            exit_spot - self.position["spot_entry"]
-        )
-        perp_pnl = self.position["perp_quantity"] * (
-            self.position["perp_entry"] - exit_perp
-        )
-        net_pnl = spot_pnl + perp_pnl
+        # Close position through market
+        exit_data = self.market.close_position(data_row)
 
         # Complete the current trade record
-        if self.current_trade is not None:
+        if self.current_trade is not None and self.is_position_open:
             self.current_trade.update(
                 {
                     "exit_date": data_row["Timestamp"],
-                    "spot_exit": exit_spot,
-                    "perp_exit": exit_perp,
+                    "spot_exit": exit_data["exit_spot"],
+                    "perp_exit": exit_data["exit_perp"],
                     "exit_funding": data_row["funding_rate"],
                     "duration": (
                         (data_row["Timestamp"] - self.current_trade["entry_date"]).days
                         if isinstance(data_row["Timestamp"], pd.Timestamp)
                         else 0
                     ),
-                    "spot_pnl": spot_pnl,
-                    "perp_pnl": perp_pnl,
-                    "net_pnl": net_pnl,
-                    "fees": self.current_trade["fees"] + exit_fee,
+                    "spot_pnl": exit_data["spot_pnl"],
+                    "perp_pnl": exit_data["perp_pnl"],
+                    "net_pnl": exit_data["net_pnl"],
+                    "fees": self.current_trade["fees"] + exit_data["exit_fee"],
                 }
             )
 
@@ -304,26 +193,13 @@ class BetaStrategy(BaseStrategy):
             self.trade_history.append(self.current_trade)
             self.current_trade = None
 
-        # Reset position state
+        # Reset strategy state
         self.is_position_open = False
         self.periods_held = 0
         old_position = self.position
         self.position = None
 
-        # Return exit information
-        return {
-            "exit_date": data_row["Timestamp"],
-            "exit_spot": exit_spot,
-            "exit_perp": exit_perp,
-            "exit_fee": exit_fee,
-            "final_spot_notional": final_spot_notional,
-            "final_perp_notional": final_perp_notional,
-            "final_total_notional": final_total_notional,
-            "spot_pnl": spot_pnl,
-            "perp_pnl": perp_pnl,
-            "net_pnl": net_pnl,
-            "position": old_position,
-        }
+        return exit_data
 
     def get_trade_statistics(self) -> Dict[str, Any]:
         """
@@ -332,6 +208,7 @@ class BetaStrategy(BaseStrategy):
         Returns:
             Dict with trade statistics
         """
+        # This method remains unchanged as it's not market-specific
         if not self.trade_history:
             return {
                 "total_trades": 0,
