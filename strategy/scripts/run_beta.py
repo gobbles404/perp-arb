@@ -14,7 +14,7 @@ import json
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 # Import our modules
-from data.data_loader import load_data, filter_date_range, calculate_metrics
+from data.data_loader import load_data, filter_date_range
 from models.strategies.beta import BetaStrategy
 from models.base.signals import FundingRateSignal
 from models.base.position_sizer import EqualNotionalSizer
@@ -104,10 +104,6 @@ def main():
         print("Failed to filter data. Exiting.")
         sys.exit(1)
 
-    # Prepare data
-    print("Calculating additional metrics...")
-    prepared_data = calculate_metrics(filtered_data)
-
     # Create signals for the strategy
     print("Setting up strategy components...")
     entry_signal = FundingRateSignal(threshold=args.funding_threshold)
@@ -139,7 +135,7 @@ def main():
     print("Running backtest...")
     backtester = VectorbtBacktester(
         strategy=strategy,
-        data=prepared_data,
+        data=filtered_data,
         initial_capital=args.capital,
         leverage=args.leverage,
         fee_rate=args.fee_rate,
