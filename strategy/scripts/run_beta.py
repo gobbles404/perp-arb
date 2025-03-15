@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Script for running the Beta strategy backtest using the new models infrastructure.
+Script for running the Beta strategy backtest with proper leverage validation.
 """
 
 import sys
@@ -21,6 +21,7 @@ from models.base.position_sizer import EqualNotionalSizer
 from backtesting.vectorbt_backtester import VectorbtBacktester
 from analytics.metrics import calculate_performance_metrics, print_performance_summary
 from analytics.visualizations import create_performance_charts
+from models.markets.spot_perp import SpotPerpMarket
 
 
 def parse_arguments():
@@ -104,6 +105,28 @@ def main():
         print("Failed to filter data. Exiting.")
         sys.exit(1)
 
+    # VALIDATE LEVERAGE FIRST - This is the key change
+    # Validate leverage against contract specifications before proceeding
+    try:
+        # Create a temporary market instance just to validate the leverage
+        # This will raise ValueError if leverage exceeds maximum allowed
+        temp_market = SpotPerpMarket(
+            data=filtered_data,
+            capital=args.capital,
+            leverage=args.leverage,
+            fee_rate=args.fee_rate,
+            enforce_margin_limits=True,
+        )
+        print(
+            f"Leverage validation successful: {args.leverage}x is within exchange limits."
+        )
+    except ValueError as e:
+        print(f"Leverage validation failed: {e}")
+        sys.exit(1)
+    except Exception as e:
+        print(f"Unexpected error during leverage validation: {e}")
+        sys.exit(1)
+
     # Create signals for the strategy
     print("Setting up strategy components...")
     entry_signal = FundingRateSignal(threshold=args.funding_threshold)
@@ -133,80 +156,85 @@ def main():
 
     # Run backtest
     print("Running backtest...")
-    backtester = VectorbtBacktester(
-        strategy=strategy,
-        data=filtered_data,
-        initial_capital=args.capital,
-        leverage=args.leverage,
-        fee_rate=args.fee_rate,
-    )
-
-    results = backtester.run()
-    if results is None:
-        print("Backtest execution failed. Exiting.")
-        sys.exit(1)
-
-    # Calculate performance metrics
-    print("Calculating performance metrics...")
-    metrics = calculate_performance_metrics(results)
-
-    # Print performance summary
-    print_performance_summary(results, metrics)
-
-    # Print trade statistics if available
-    if hasattr(strategy, "trade_history") and strategy.trade_history:
-        trade_stats = strategy.get_trade_statistics()
-        print("\n=== TRADE STATISTICS ===")
-        print(f"Total Trades: {trade_stats['total_trades']}")
-        print(
-            f"Winning Trades: {trade_stats['winning_trades']} ({trade_stats['win_rate']*100:.2f}%)"
+    try:
+        backtester = VectorbtBacktester(
+            strategy=strategy,
+            data=filtered_data,
+            initial_capital=args.capital,
+            leverage=args.leverage,
+            fee_rate=args.fee_rate,
         )
-        print(f"Losing Trades: {trade_stats['losing_trades']}")
-        print(f"Average Profit on Winners: ${trade_stats['average_profit']:.2f}")
-        print(f"Average Loss on Losers: ${trade_stats['average_loss']:.2f}")
-        print(f"Average Trade Duration: {trade_stats['average_duration']:.2f} days")
-        print(f"Profit Factor: {trade_stats['profit_factor']:.2f}")
 
-    # Generate visualizations
-    if not args.no_plot:
-        print("Generating visualization charts...")
-        try:
-            create_performance_charts(results, metrics, args.output_dir)
-        except Exception as e:
-            print(f"Error creating charts: {str(e)}")
+        results = backtester.run()
+        if results is None:
+            print("Backtest execution failed. Exiting.")
+            sys.exit(1)
 
-    # Save results
-    timestamp = datetime.now().strftime("%Y%m%d%H%M%S")
-    result_path = f"{args.output_dir}/beta_strategy_results_{timestamp}.json"
+        # Calculate performance metrics
+        print("Calculating performance metrics...")
+        metrics = calculate_performance_metrics(results)
 
-    # Convert any non-serializable objects to serializable formats
-    serializable_metrics = {}
-    for k, v in metrics.items():
-        if isinstance(v, (float, np.floating)):
-            serializable_metrics[k] = float(v)
-        elif isinstance(v, (int, np.integer)):
-            serializable_metrics[k] = int(v)
-        else:
-            serializable_metrics[k] = v
+        # Print performance summary
+        print_performance_summary(results, metrics)
 
-    with open(result_path, "w") as f:
-        json.dump(
-            {
-                "metrics": serializable_metrics,
-                "parameters": {
-                    "funding_threshold": args.funding_threshold,
-                    "exit_threshold": args.exit_threshold,
-                    "min_holding_periods": args.min_holding_periods,
-                    "capital": args.capital,
-                    "leverage": args.leverage,
-                    "fee_rate": args.fee_rate,
+        # Print trade statistics if available
+        if hasattr(strategy, "trade_history") and strategy.trade_history:
+            trade_stats = strategy.get_trade_statistics()
+            print("\n=== TRADE STATISTICS ===")
+            print(f"Total Trades: {trade_stats['total_trades']}")
+            print(
+                f"Winning Trades: {trade_stats['winning_trades']} ({trade_stats['win_rate']*100:.2f}%)"
+            )
+            print(f"Losing Trades: {trade_stats['losing_trades']}")
+            print(f"Average Profit on Winners: ${trade_stats['average_profit']:.2f}")
+            print(f"Average Loss on Losers: ${trade_stats['average_loss']:.2f}")
+            print(f"Average Trade Duration: {trade_stats['average_duration']:.2f} days")
+            print(f"Profit Factor: {trade_stats['profit_factor']:.2f}")
+
+        # Generate visualizations
+        if not args.no_plot:
+            print("Generating visualization charts...")
+            try:
+                create_performance_charts(results, metrics, args.output_dir)
+            except Exception as e:
+                print(f"Error creating charts: {str(e)}")
+
+        # Save results
+        timestamp = datetime.now().strftime("%Y%m%d%H%M%S")
+        result_path = f"{args.output_dir}/beta_strategy_results_{timestamp}.json"
+
+        # Convert any non-serializable objects to serializable formats
+        serializable_metrics = {}
+        for k, v in metrics.items():
+            if isinstance(v, (float, np.floating)):
+                serializable_metrics[k] = float(v)
+            elif isinstance(v, (int, np.integer)):
+                serializable_metrics[k] = int(v)
+            else:
+                serializable_metrics[k] = v
+
+        with open(result_path, "w") as f:
+            json.dump(
+                {
+                    "metrics": serializable_metrics,
+                    "parameters": {
+                        "funding_threshold": args.funding_threshold,
+                        "exit_threshold": args.exit_threshold,
+                        "min_holding_periods": args.min_holding_periods,
+                        "capital": args.capital,
+                        "leverage": args.leverage,
+                        "fee_rate": args.fee_rate,
+                    },
                 },
-            },
-            f,
-            indent=4,
-        )
+                f,
+                indent=4,
+            )
 
-    print(f"Results saved to {result_path}")
+        print(f"Results saved to {result_path}")
+
+    except Exception as e:
+        print(f"Error during backtest: {e}")
+        sys.exit(1)
 
 
 if __name__ == "__main__":

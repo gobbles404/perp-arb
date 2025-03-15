@@ -1,8 +1,9 @@
 """
-Spot-Perpetual Market Structure Implementation.
+Spot-Perpetual Market Structure with Capital-Efficient Leverage.
 
 This class represents the market structure where a strategy trades
-spot and perpetual futures contracts simultaneously.
+spot and perpetual futures contracts with delta neutrality, applying
+leverage only to the perpetual futures side for capital efficiency.
 """
 
 import pandas as pd
@@ -12,13 +13,13 @@ from typing import Dict, Any, List, Tuple, Optional
 
 class SpotPerpMarket:
     """
-    Market structure for spot and perpetual futures trading.
+    Market structure for spot and perpetual futures trading with capital-efficient leverage.
 
-    This market structure implements a standard spot-perp trading setup where:
+    This market structure implements a delta-neutral spot-perp trading setup where:
     - Long spot positions are balanced against short perpetual futures
-    - Capital is allocated between the two instruments
-    - Leverage is applied within exchange constraints
-    - Funding payments are received/paid on the perpetual position
+    - Leverage is applied only to the perpetual futures side
+    - Capital is allocated efficiently to maintain delta neutrality
+    - Funding payments are received/paid on the leveraged perpetual position
     """
 
     def __init__(
@@ -27,8 +28,8 @@ class SpotPerpMarket:
         capital: float,
         leverage: float,
         fee_rate: float,
-        allocation: str = "50-50",
-        enforce_margin_limits: bool = False,
+        allocation: str = "50-50",  # Legacy parameter, no longer used
+        enforce_margin_limits: bool = True,
         **kwargs,
     ):
         """
@@ -37,24 +38,34 @@ class SpotPerpMarket:
         Args:
             data: Market data DataFrame
             capital: Initial capital
-            leverage: Leverage multiplier
+            leverage: Leverage multiplier (applied to perpetual futures only)
             fee_rate: Trading fee rate
-            allocation: Capital allocation between spot-perp (e.g., "60-40")
+            allocation: Legacy parameter, not used in capital-efficient mode
             enforce_margin_limits: Whether to enforce exchange margin limits
             **kwargs: Additional keyword arguments
         """
         self.data = data
         self.capital = capital
-        self.leverage = leverage
+        self.requested_leverage = leverage  # Store original requested leverage
         self.fee_rate = fee_rate
 
-        # Parse allocation
-        self.allocation_str = allocation
-        self.allocation = self._parse_allocation(allocation)
+        # Extract and store margin requirements
+        self.initial_margin_pct = self._extract_initial_margin()
+        self.maint_margin_pct = self._extract_maint_margin()
+        self.liquidation_fee_pct = self._extract_liquidation_fee()
+        self.max_leverage = self._calculate_max_leverage()
 
-        # Leverage settings
+        # Validate requested leverage against exchange limits
         self.enforce_margin_limits = enforce_margin_limits
-        self.effective_leverage = self._calculate_effective_leverage()
+        if self.enforce_margin_limits and leverage > self.max_leverage:
+            raise ValueError(
+                f"Requested leverage ({leverage}x) exceeds maximum allowed ({self.max_leverage:.2f}x)"
+            )
+
+        # Set effective leverage
+        self.perp_leverage = (
+            min(leverage, self.max_leverage) if self.enforce_margin_limits else leverage
+        )
 
         # Initialize position tracking
         self.spot_quantity = 0
@@ -63,71 +74,99 @@ class SpotPerpMarket:
         self.perp_entry_price = 0
         self.is_position_open = False
 
+        # Allocation tracking
+        self.spot_allocation = 0  # Will be calculated during position sizing
+        self.perp_allocation = 0  # Will be calculated during position sizing
+
         # Funding multiplier (set by strategy)
         self.funding_periods_multiplier = 1
 
-    def _parse_allocation(self, allocation_str: str) -> List[float]:
-        """
-        Parse allocation string into spot and perp percentages.
+        # Print initial configuration
+        print(f"SpotPerpMarket initialized with:")
+        print(f"  Capital: ${capital}")
+        print(f"  Requested perp leverage: {leverage}x")
+        print(f"  Exchange max leverage: {self.max_leverage:.2f}x")
+        print(f"  Effective perp leverage: {self.perp_leverage:.2f}x")
+        print(f"  Initial margin: {self.initial_margin_pct:.2f}%")
+        print(f"  Maintenance margin: {self.maint_margin_pct:.2f}%")
+        print(f"  Liquidation fee: {self.liquidation_fee_pct:.2f}%")
+        print(f"  Fee rate: {fee_rate*100:.4f}%")
+        print(f"  Mode: Capital-efficient delta neutral")
 
-        Args:
-            allocation_str: String like "60-40" for 60% spot, 40% perp
+    def _extract_initial_margin(self) -> float:
+        """
+        Extract initial margin requirement from contract specifications.
 
         Returns:
-            List of allocation percentages [spot_pct, perp_pct]
+            Initial margin percentage
         """
-        try:
-            parts = allocation_str.split("-")
-            if len(parts) != 2:
-                print(
-                    f"Warning: Invalid allocation format '{allocation_str}'. Using 50-50."
-                )
-                return [0.5, 0.5]
+        if len(self.data) == 0:
+            return 5.0  # Default value if no data
 
-            spot_pct = float(parts[0]) / 100
-            perp_pct = float(parts[1]) / 100
+        first_row = self.data.iloc[0]
 
-            # Validate allocations sum to 100%
-            if abs(spot_pct + perp_pct - 1.0) > 0.001:
-                print(
-                    f"Warning: Allocation '{allocation_str}' doesn't sum to 100%. Normalizing."
-                )
-                total = spot_pct + perp_pct
-                spot_pct /= total
-                perp_pct /= total
+        # Check for the exact column name
+        if "perpetual_initial" in first_row:
+            return first_row["perpetual_initial"]
+        else:
+            return 5.0  # Default value
 
-            return [spot_pct, perp_pct]
-        except Exception as e:
-            print(f"Error parsing allocation '{allocation_str}': {e}. Using 50-50.")
-            return [0.5, 0.5]
-
-    def _calculate_effective_leverage(self) -> float:
+    def _extract_maint_margin(self) -> float:
         """
-        Calculate effective leverage considering exchange limits if enabled.
+        Extract maintenance margin requirement from contract specifications.
 
         Returns:
-            Effective leverage to use (may be lower than requested)
+            Maintenance margin percentage
         """
-        effective_leverage = self.leverage
+        if len(self.data) == 0:
+            return 2.5  # Default value if no data
 
-        if self.enforce_margin_limits and "perp_max_leverage" in self.data.columns:
-            # Find the maximum leverage limit in first data point
-            first_row = self.data.iloc[0]
-            if "perp_max_leverage" in first_row and first_row["perp_max_leverage"] > 0:
-                max_leverage = first_row["perp_max_leverage"]
+        first_row = self.data.iloc[0]
 
-                if effective_leverage > max_leverage:
-                    print(
-                        f"Requested leverage {effective_leverage}x exceeds exchange limit "
-                        f"{max_leverage}x. Using maximum allowed."
-                    )
-                    effective_leverage = max_leverage
+        # Check for the exact column name
+        if "perpetual_maint" in first_row:
+            return first_row["perpetual_maint"]
+        else:
+            return 2.5  # Default value
 
-        return effective_leverage
+    def _extract_liquidation_fee(self) -> float:
+        """
+        Extract liquidation fee from contract specifications.
+
+        Returns:
+            Liquidation fee percentage
+        """
+        if len(self.data) == 0:
+            return 0.5  # Default value if no data
+
+        first_row = self.data.iloc[0]
+
+        # Check for the exact column name
+        if "perpetual_liquidation_fee" in first_row:
+            return first_row["perpetual_liquidation_fee"]
+        else:
+            return 0.5  # Default value
+
+    def _calculate_max_leverage(self) -> float:
+        """
+        Calculate maximum allowed leverage based on initial margin requirement.
+
+        Returns:
+            Maximum allowed leverage
+        """
+        if self.initial_margin_pct <= 0:
+            return 100.0  # Arbitrary high value if margin requirement is invalid
+
+        return 100.0 / self.initial_margin_pct
 
     def calculate_position_sizes(self, data_row: pd.Series) -> Dict[str, float]:
         """
-        Calculate position sizes for spot and perpetual futures.
+        Calculate position sizes for spot and perpetual futures with capital-efficient leverage.
+
+        This implementation:
+        1. Applies leverage only to the perpetual futures position
+        2. Determines optimal capital allocation for delta neutrality
+        3. Ensures equal notional value on both spot and perp sides
 
         Args:
             data_row: Current market data row
@@ -146,23 +185,59 @@ class SpotPerpMarket:
                 "spot_notional": 0,
                 "perp_notional": 0,
                 "total_notional": 0,
+                "spot_allocation": 0,
+                "perp_allocation": 0,
             }
 
-        # Calculate notional values
-        total_notional = self.capital * self.effective_leverage
-        spot_notional = total_notional * self.allocation[0]
-        perp_notional = total_notional * self.allocation[1]
+        # Calculate optimal capital allocation for delta neutrality
+        # For L = leverage, we need:
+        # spot_alloc + perp_alloc = capital
+        # spot_alloc = perp_alloc * L
+        # Solving these two equations:
+        perp_allocation = self.capital / (1 + self.perp_leverage)
+        spot_allocation = self.capital - perp_allocation
+
+        # Store allocations
+        self.spot_allocation = spot_allocation
+        self.perp_allocation = perp_allocation
+
+        # Calculate notional values (should be equal for delta neutrality)
+        perp_notional = perp_allocation * self.perp_leverage
+        spot_notional = spot_allocation
+
+        # Double-check delta neutrality
+        if abs(spot_notional - perp_notional) > 0.01:
+            print(
+                f"Warning: Delta neutrality not achieved. Spot: ${spot_notional:.2f}, Perp: ${perp_notional:.2f}"
+            )
+            # Adjust to ensure exact delta neutrality
+            target_notional = min(spot_notional, perp_notional)
+            spot_notional = target_notional
+            perp_notional = target_notional
 
         # Calculate quantities
         spot_quantity = spot_notional / spot_price
         perp_quantity = perp_notional / perp_price
 
+        # Calculate total capital deployed
+        total_capital_deployed = spot_allocation + perp_allocation
+
+        # Calculate effective portfolio leverage (total notional / capital)
+        total_notional = spot_notional + perp_notional
+        effective_portfolio_leverage = total_notional / self.capital
+
+        # Return position details
         return {
             "spot_quantity": spot_quantity,
             "perp_quantity": perp_quantity,
             "spot_notional": spot_notional,
             "perp_notional": perp_notional,
-            "total_notional": spot_notional + perp_notional,
+            "spot_allocation": spot_allocation,
+            "perp_allocation": perp_allocation,
+            "perp_leverage": self.perp_leverage,
+            "total_notional": total_notional,
+            "effective_portfolio_leverage": effective_portfolio_leverage,
+            "total_capital_deployed": total_capital_deployed,
         }
 
     def initialize_position(
@@ -190,6 +265,8 @@ class SpotPerpMarket:
         spot_notional = sizes["spot_notional"]
         perp_notional = sizes["perp_notional"]
         total_notional = sizes["total_notional"]
+        spot_allocation = sizes["spot_allocation"]
+        perp_allocation = sizes["perp_allocation"]
 
         # Calculate fees
         entry_fee = total_notional * self.fee_rate
@@ -212,10 +289,35 @@ class SpotPerpMarket:
             "entry_fee": entry_fee,
             "spot_notional": spot_notional,
             "perp_notional": perp_notional,
+            "spot_allocation": spot_allocation,
+            "perp_allocation": perp_allocation,
+            "perp_leverage": self.perp_leverage,
             "total_notional": total_notional,
-            "allocation": self.allocation_str,
-            "effective_leverage": self.effective_leverage,
+            "effective_portfolio_leverage": sizes["effective_portfolio_leverage"],
         }
+
+        # Log position information
+        print(f"\nPosition initialized with capital-efficient leverage:")
+        print(f"  Entry Date: {position['entry_date']}")
+        print(f"  Capital: ${self.capital:.2f}")
+        print(
+            f"  Spot Allocation: ${spot_allocation:.2f} ({spot_allocation/self.capital*100:.1f}% of capital)"
+        )
+        print(
+            f"  Perp Allocation: ${perp_allocation:.2f} ({perp_allocation/self.capital*100:.1f}% of capital)"
+        )
+        print(f"  Perp Leverage: {self.perp_leverage:.2f}x")
+        print(f"  Spot Entry: ${position['spot_entry']:.2f}")
+        print(f"  Perp Entry: ${position['perp_entry']:.2f}")
+        print(f"  Spot Quantity: {position['spot_quantity']:.8f}")
+        print(f"  Perp Quantity: {position['perp_quantity']:.8f}")
+        print(f"  Spot Notional: ${position['spot_notional']:.2f}")
+        print(f"  Perp Notional: ${position['perp_notional']:.2f}")
+        print(f"  Total Notional: ${position['total_notional']:.2f}")
+        print(
+            f"  Effective Portfolio Leverage: {position['effective_portfolio_leverage']:.2f}x"
+        )
+        print(f"  Entry Fee: ${position['entry_fee']:.2f}")
 
         return position
 
@@ -239,9 +341,11 @@ class SpotPerpMarket:
             "entry_fee": 0,
             "spot_notional": 0,
             "perp_notional": 0,
+            "spot_allocation": 0,
+            "perp_allocation": 0,
+            "perp_leverage": self.effective_perp_leverage,
             "total_notional": 0,
-            "allocation": self.allocation_str,
-            "effective_leverage": self.effective_leverage,
+            "effective_portfolio_leverage": 1.0,
         }
 
     def calculate_pnl(self, data_row: pd.Series) -> Dict[str, Any]:
@@ -279,7 +383,8 @@ class SpotPerpMarket:
         # Perp PnL (short position)
         perp_pnl = self.perp_quantity * (self.perp_entry_price - perp_price)
 
-        # Calculate funding payment
+        # Calculate funding payment based on leveraged perpetual position size
+        # Funding payment = position size * price * funding rate * period multiplier
         funding_payment = (
             self.perp_quantity
             * perp_price
@@ -292,6 +397,21 @@ class SpotPerpMarket:
         perp_notional = self.perp_quantity * perp_price
         total_notional = spot_notional + perp_notional
 
+        # Calculate updated equity (capital + accumulated PnL)
+        # This includes PnL from both spot and perp positions, plus accumulated funding
+        net_market_pnl = spot_pnl + perp_pnl
+        current_equity = self.capital + net_market_pnl + funding_payment
+
+        # Calculate current leverage (perp notional / perp allocation)
+        current_perp_leverage = (
+            perp_notional / self.perp_allocation if self.perp_allocation > 0 else 0
+        )
+
+        # Calculate effective portfolio leverage (total notional / equity)
+        current_portfolio_leverage = (
+            total_notional / current_equity if current_equity > 0 else 0
+        )
+
         # Update result
         result.update(
             {
@@ -301,6 +421,9 @@ class SpotPerpMarket:
                 "spot_notional": spot_notional,
                 "perp_notional": perp_notional,
                 "total_notional": total_notional,
+                "equity": current_equity,
+                "current_perp_leverage": current_perp_leverage,
+                "current_portfolio_leverage": current_portfolio_leverage,
             }
         )
 
@@ -351,6 +474,8 @@ class SpotPerpMarket:
             "perp_quantity": self.perp_quantity,
             "spot_entry_price": self.spot_entry_price,
             "perp_entry_price": self.perp_entry_price,
+            "spot_allocation": self.spot_allocation,
+            "perp_allocation": self.perp_allocation,
         }
 
         # Reset position state
@@ -358,6 +483,8 @@ class SpotPerpMarket:
         self.perp_quantity = 0
         self.spot_entry_price = 0
         self.perp_entry_price = 0
+        self.spot_allocation = 0
+        self.perp_allocation = 0
         self.is_position_open = False
 
         # Return exit information
@@ -393,9 +520,13 @@ class SpotPerpMarket:
         """
         return {
             "market_type": "spot-perp",
-            "allocation": self.allocation_str,
-            "leverage": self.leverage,
-            "effective_leverage": self.effective_leverage,
+            "requested_leverage": self.requested_leverage,
+            "perp_leverage": self.perp_leverage,
+            "max_leverage": self.max_leverage,
+            "initial_margin_pct": self.initial_margin_pct,
+            "liquidation_fee_pct": self.liquidation_fee_pct,
             "capital": self.capital,
             "is_position_open": self.is_position_open,
+            "spot_allocation": self.spot_allocation,
+            "perp_allocation": self.perp_allocation,
         }
