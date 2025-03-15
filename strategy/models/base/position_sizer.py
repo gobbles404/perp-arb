@@ -9,6 +9,10 @@ import pandas as pd
 from .base_strategy import StrategyContext
 
 
+# todo: this is where delta warehousing might go
+# todo: this is where incorporation of futures margining goes
+
+
 class PositionSizer(ABC):
     """Base class for position sizing logic."""
 

@@ -50,6 +50,32 @@ def load_data(file_path):
         return None
 
 
+def load_futures_contracts(file_path="data/contracts/fut_specs.csv"):
+    """Load futures contract data with contract information."""
+    print(f"Loading futures contracts from {file_path}")
+
+    try:
+        contracts_df = pd.read_csv(file_path)
+
+        # Convert timestamps to datetime
+        contracts_df["deliveryDate"] = pd.to_datetime(
+            contracts_df["deliveryDate"], unit="ms"
+        )
+        contracts_df["onboardDate"] = pd.to_datetime(
+            contracts_df["onboardDate"], unit="ms"
+        )
+
+        # Calculate max leverage based on margin requirements
+        contracts_df["maxLeverage"] = 100 / contracts_df["requiredMarginPercent"]
+
+        print(f"Loaded {len(contracts_df)} futures contracts")
+        return contracts_df
+
+    except Exception as e:
+        print(f"Error loading futures contracts: {e}")
+        return None
+
+
 def filter_date_range(data, start_date=None, end_date=None):
     """Filter data by date range."""
     df = data.copy()
@@ -87,3 +113,9 @@ def calculate_metrics(data):
     df["funding_apr"] = df["funding_apr"].fillna(0)
 
     return df
+
+
+# todo: join contract data with the price data.
+def enrich_market_data(data):
+
+    pass

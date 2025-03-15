@@ -16,6 +16,3 @@ from .signals import (
 )
 from .position_sizer import PositionSizer, EqualNotionalSizer
 from .risk_manager import RiskManager
-
-# Version
-__version__ = "0.1.0"
