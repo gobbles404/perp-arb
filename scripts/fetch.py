@@ -24,12 +24,16 @@ import logging
 import sys
 import os
 import csv
-from datetime import datetime
 import subprocess
 
 # Add the scripts directory to Python's path
 current_dir = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, current_dir)
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from logging_config import get_logger
+
+logger = get_logger(__name__)
 
 # Import the fetchers
 from fetchers import (
@@ -49,24 +53,10 @@ from config import (
     LOG_LEVEL,
 )
 
-# Configure logging
-logging.basicConfig(
-    level=getattr(logging, LOG_LEVEL),
-    format="%(asctime)s - %(levelname)s - %(message)s",
-    datefmt="%Y-%m-%d %H:%M:%S",
-)
-logger = logging.getLogger("BinanceFetcher")
-
 
 def get_matching_futures_contracts(base_symbol):
     """
     Read the fut_expirys.csv file and return all futures contracts matching the base symbol.
-
-    Args:
-        base_symbol (str): Base symbol, e.g., "BTCUSDT"
-
-    Returns:
-        list: List of matching futures contract symbols
     """
     futures_contracts = []
 

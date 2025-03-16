@@ -1,4 +1,4 @@
-# scripts/config.py
+import os
 from datetime import datetime, timedelta
 
 # Global date settings
@@ -17,5 +17,23 @@ DEFAULT_INTERVALS = {
 # Default symbol
 DEFAULT_SYMBOL = "BTCUSDT"
 
+# Directory Structure
+CSV_DIR = "data"
+RAW_DIR = os.path.join(CSV_DIR, "raw")
+PROCESSED_DIR = os.path.join(CSV_DIR, "processed")
+MARKETS_DIR = os.path.join(CSV_DIR, "markets")
+CONTRACTS_DIR = os.path.join(CSV_DIR, "contracts")
+
+
+# Ensure all directories exist
+def ensure_directories():
+    """Create all required directories if they don't exist."""
+    for directory in [CSV_DIR, RAW_DIR, PROCESSED_DIR, MARKETS_DIR, CONTRACTS_DIR]:
+        os.makedirs(directory, exist_ok=True)
+
+
+# Create directories when module is imported
+ensure_directories()
+
 # Other global settings
-LOG_LEVEL = "INFO"
+LOG_LEVEL = "INFO"  # Consider removing this once logging_config is fully implemented

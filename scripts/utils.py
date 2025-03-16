@@ -1,26 +1,13 @@
 import os
-import logging
+import sys
 from datetime import datetime, timezone, timedelta
 import pandas as pd
 import re
 
-# Configure logging
-logger = logging.getLogger("utils")
-if not logger.handlers:  # Only add handler if not already configured
-    handler = logging.StreamHandler()
-    formatter = logging.Formatter(
-        "%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-        datefmt="%Y-%m-%d %H:%M:%S",
-    )
-    handler.setFormatter(formatter)
-    logger.addHandler(handler)
-    logger.setLevel(logging.INFO)
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from logging_config import get_logger
 
-# Create base directory structure
-CSV_DIR = "data"
-RAW_DIR = os.path.join(CSV_DIR, "raw")
-os.makedirs(CSV_DIR, exist_ok=True)
-os.makedirs(RAW_DIR, exist_ok=True)
+logger = get_logger(__name__)
 
 
 def get_last_expected_timestamp(interval):
@@ -90,15 +77,6 @@ def date_to_timestamp(start_date, end_date):
 def save_to_csv(df, filepath, symbol=None, interval=None):
     """
     Save DataFrame to CSV file with structured directory path.
-
-    Args:
-        df (pandas.DataFrame): DataFrame to save
-        filepath (str): Full relative path where the file should be saved
-        symbol (str, optional): Trading pair symbol (for logging)
-        interval (str, optional): Time interval (for logging)
-
-    Returns:
-        str: Full path where the file was saved
     """
     import os
     from pathlib import Path
