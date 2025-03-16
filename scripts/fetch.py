@@ -351,8 +351,12 @@ def main():
                     else " ".join(DEFAULT_INTERVALS["futures"])
                 )
 
+                # Get the path to data_pipeline.sh relative to fetch.py
+                script_dir = os.path.dirname(os.path.abspath(__file__))
+                pipeline_script = os.path.join(script_dir, "data_pipeline.sh")
+
                 # Run the shell script with the symbol and intervals as arguments
-                cmd = ["./data_pipeline.sh", args.symbol, interval_str]
+                cmd = [pipeline_script, args.symbol, interval_str]
                 logger.info(f"Executing: {' '.join(cmd)}")
 
                 result = subprocess.run(cmd, check=True, text=True, capture_output=True)
