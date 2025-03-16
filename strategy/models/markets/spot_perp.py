@@ -763,3 +763,174 @@ class SpotPerpMarket:
             "maintenance_margin_pct": self.maint_margin_pct,
             "accumulated_funding": self.accumulated_funding,  # Include accumulated funding in result
         }
+
+    def adjust_position(self, data_row, spot_adjustment_pct=0, perp_adjustment_pct=0):
+        """
+        Adjust the current position by specified percentage amounts.
+
+        This method allows for partial position adjustments to rebalance based on health factor.
+        Positive values increase position size, negative values decrease position size.
+
+        Args:
+            data_row: Current market data row
+            spot_adjustment_pct: Percentage to adjust spot position by (e.g. -0.1 = reduce by 10%)
+            perp_adjustment_pct: Percentage to adjust perp position by (e.g. -0.1 = reduce by 10%)
+
+        Returns:
+            Dict with adjustment details including fees
+        """
+        if not self.is_position_open:
+            print("Warning: Cannot adjust position - no position is currently open")
+            return {"success": False, "reason": "no_position_open"}
+
+        # Get current prices
+        spot_price = data_row["spot_close"]
+        perp_price = data_row["perp_close"]
+
+        # Calculate adjustment quantities
+        original_spot_qty = self.spot_quantity
+        original_perp_qty = self.perp_quantity
+
+        spot_adjustment_qty = original_spot_qty * spot_adjustment_pct
+        perp_adjustment_qty = original_perp_qty * perp_adjustment_pct
+
+        # Calculate new quantities
+        new_spot_qty = original_spot_qty + spot_adjustment_qty
+        new_perp_qty = original_perp_qty + perp_adjustment_qty
+
+        # Calculate notional values of the adjustments
+        spot_adjustment_notional = abs(spot_adjustment_qty * spot_price)
+        perp_adjustment_notional = abs(perp_adjustment_qty * perp_price)
+        total_adjustment_notional = spot_adjustment_notional + perp_adjustment_notional
+
+        # Calculate adjustment fees
+        adjustment_fee = total_adjustment_notional * self.fee_rate
+
+        # Update position quantities
+        self.spot_quantity = new_spot_qty
+        self.perp_quantity = new_perp_qty
+
+        # Calculate new notional values
+        new_spot_notional = new_spot_qty * spot_price
+        new_perp_notional = new_perp_qty * perp_price
+
+        # Return adjustment details
+        return {
+            "success": True,
+            "timestamp": data_row["Timestamp"],
+            "original_spot_qty": original_spot_qty,
+            "original_perp_qty": original_perp_qty,
+            "spot_adjustment_pct": spot_adjustment_pct,
+            "perp_adjustment_pct": perp_adjustment_pct,
+            "spot_adjustment_qty": spot_adjustment_qty,
+            "perp_adjustment_qty": perp_adjustment_qty,
+            "new_spot_qty": new_spot_qty,
+            "new_perp_qty": new_perp_qty,
+            "spot_price": spot_price,
+            "perp_price": perp_price,
+            "spot_adjustment_notional": spot_adjustment_notional,
+            "perp_adjustment_notional": perp_adjustment_notional,
+            "total_adjustment_notional": total_adjustment_notional,
+            "adjustment_fee": adjustment_fee,
+            "new_spot_notional": new_spot_notional,
+            "new_perp_notional": new_perp_notional,
+        }
+
+    def calculate_adjustment_for_target_health(self, data_row, target_health_factor):
+        """
+        Calculate the optimal position adjustment to reach a target health factor.
+
+        Args:
+            data_row: Current market data row
+            target_health_factor: Desired health factor after adjustment
+
+        Returns:
+            Dict with recommended adjustment percentages
+        """
+        # First, calculate current health factor
+        current_health = self.calculate_health_factor()
+        current_health_factor = current_health["health_factor"]
+
+        if current_health_factor == target_health_factor:
+            return {
+                "spot_adjustment_pct": 0,
+                "perp_adjustment_pct": 0,
+                "current_health_factor": current_health_factor,
+                "target_health_factor": target_health_factor,
+            }
+
+        # Determine if we need to increase or decrease risk
+        if current_health_factor < target_health_factor:
+            # Need to decrease risk (reduce position sizes)
+            # To increase health factor from X to Y, multiply position by X/Y
+            adjustment_ratio = current_health_factor / target_health_factor
+            # We want to reduce both spot and perp by same percentage to maintain delta neutrality
+            spot_adjustment_pct = adjustment_ratio - 1  # Negative percentage
+            perp_adjustment_pct = adjustment_ratio - 1  # Negative percentage
+        else:
+            # Need to increase risk (increase position sizes)
+            # To decrease health factor from X to Y, multiply position by X/Y
+            adjustment_ratio = current_health_factor / target_health_factor
+            # We want to increase both spot and perp by same percentage to maintain delta neutrality
+            spot_adjustment_pct = adjustment_ratio - 1  # Positive percentage
+            perp_adjustment_pct = adjustment_ratio - 1  # Positive percentage
+
+        return {
+            "spot_adjustment_pct": spot_adjustment_pct,
+            "perp_adjustment_pct": perp_adjustment_pct,
+            "current_health_factor": current_health_factor,
+            "target_health_factor": target_health_factor,
+            "adjustment_ratio": adjustment_ratio,
+        }
+
+    def rebalance_to_target_health(self, data_row, target_health_factor):
+        """
+        Rebalance the position to reach a target health factor.
+
+        Args:
+            data_row: Current market data row
+            target_health_factor: Desired health factor after rebalancing
+
+        Returns:
+            Dict with rebalancing details
+        """
+        # First, calculate the needed adjustment
+        adjustment_calc = self.calculate_adjustment_for_target_health(
+            data_row, target_health_factor
+        )
+
+        # If no adjustment needed, return early
+        if abs(adjustment_calc["spot_adjustment_pct"]) < 0.001:  # Less than 0.1% change
+            return {
+                "rebalanced": False,
+                "reason": "health_factor_already_at_target",
+                "current_health_factor": adjustment_calc["current_health_factor"],
+                "target_health_factor": target_health_factor,
+            }
+
+        # Apply the adjustment
+        rebalance_result = self.adjust_position(
+            data_row,
+            spot_adjustment_pct=adjustment_calc["spot_adjustment_pct"],
+            perp_adjustment_pct=adjustment_calc["perp_adjustment_pct"],
+        )
+
+        # Calculate new health factor after adjustment
+        new_health = self.calculate_health_factor()
+
+        # Add health factor information to result
+        rebalance_result.update(
+            {
+                "rebalanced": True,
+                "initial_health_factor": adjustment_calc["current_health_factor"],
+                "target_health_factor": target_health_factor,
+                "final_health_factor": new_health["health_factor"],
+                "adjustment_type": (
+                    "reduce_risk"
+                    if adjustment_calc["spot_adjustment_pct"] < 0
+                    else "increase_risk"
+                ),
+            }
+        )
+
+        return rebalance_result
