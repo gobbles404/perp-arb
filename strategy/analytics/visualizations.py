@@ -390,9 +390,6 @@ def plot_basis_funding_time_series(ax, data):
     ax.grid(True)
 
 
-# Add to analytics/visualizations.py
-
-
 def plot_health_factor_over_time(ax, health_factors, dates):
     """
     Plot health factor evolution over the backtest period.
@@ -635,37 +632,6 @@ def print_risk_summary(results):
     if close_calls:
         print(f"\nRisk Events During Backtest:")
         print(f"  Near-Liquidation Events (Health Factor < 1.2): {close_calls}")
-
-    # Stress test summary
-    stress_test = results.get("latest_stress_test", None)
-    if stress_test:
-        print("\nStress Test Summary:")
-
-        # Price increase scenarios
-        up_scenarios = stress_test.get("upside_scenarios", [])
-        if up_scenarios:
-            max_safe_increase = None
-            for scenario in up_scenarios:
-                if not scenario.get("liquidation", False):
-                    max_safe_increase = scenario.get("price_change_pct", None)
-
-            if max_safe_increase is not None:
-                print(f"  Can withstand price increase of: {max_safe_increase}%")
-            else:
-                print("  Cannot withstand any significant price increase")
-
-        # Basis expansion scenarios
-        basis_scenarios = stress_test.get("basis_expansion_scenarios", [])
-        if basis_scenarios:
-            max_safe_basis = None
-            for scenario in basis_scenarios:
-                if not scenario.get("liquidation", False):
-                    max_safe_basis = scenario.get("basis_change_pct", None)
-
-            if max_safe_basis is not None:
-                print(f"  Can withstand basis expansion of: {max_safe_basis}%")
-            else:
-                print("  Cannot withstand any significant basis expansion")
 
     print("\nRecommendations:")
     if latest_health and latest_health < 1.5:

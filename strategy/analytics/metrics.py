@@ -168,7 +168,7 @@ def calculate_performance_metrics(results):
             if np.isnan(p_value):
                 p_value = 1
 
-    # Create metrics dictionary
+    # Create metrics dictionary with existing metrics
     metrics = {
         "days_held": days_held,
         "total_pnl": total_pnl,
@@ -195,6 +195,66 @@ def calculate_performance_metrics(results):
         "basis_funding_correlation": correlation,
         "basis_funding_p_value": p_value,
     }
+
+    # Add risk metrics
+
+    # Health factor metrics
+    if "health_factors" in results and results["health_factors"]:
+        # Filter out None values
+        valid_health_factors = [
+            hf for hf in results["health_factors"] if hf is not None
+        ]
+
+        if valid_health_factors:
+            metrics["min_health_factor"] = min(valid_health_factors)
+            metrics["avg_health_factor"] = sum(valid_health_factors) / len(
+                valid_health_factors
+            )
+            metrics["final_health_factor"] = valid_health_factors[-1]
+
+            # Calculate time spent in different risk zones
+            total_periods = len(valid_health_factors)
+            high_risk_periods = sum(1 for hf in valid_health_factors if hf < 1.5)
+            safe_periods = sum(1 for hf in valid_health_factors if hf >= 3)
+
+            metrics["pct_time_high_risk"] = (
+                (high_risk_periods / total_periods) * 100 if total_periods > 0 else 0
+            )
+            metrics["pct_time_safe"] = (
+                (safe_periods / total_periods) * 100 if total_periods > 0 else 0
+            )
+
+    # Liquidation buffer metrics
+    if "buffer_percentages" in results and results["buffer_percentages"]:
+        # Filter out None values
+        valid_buffers = [b for b in results["buffer_percentages"] if b is not None]
+
+        if valid_buffers:
+            metrics["min_liquidation_buffer"] = min(valid_buffers)
+            metrics["avg_liquidation_buffer"] = sum(valid_buffers) / len(valid_buffers)
+            metrics["final_liquidation_buffer"] = valid_buffers[-1]
+
+            # Calculate time spent with dangerously low buffer
+            danger_threshold = 10  # Less than 10% buffer is dangerous
+            total_buffer_periods = len(valid_buffers)
+            dangerous_periods = sum(1 for b in valid_buffers if b < danger_threshold)
+
+            metrics["pct_time_danger_zone"] = (
+                (dangerous_periods / total_buffer_periods) * 100
+                if total_buffer_periods > 0
+                else 0
+            )
+
+    # Add close calls to metrics
+    metrics["liquidation_close_calls"] = results.get("close_calls", 0)
+
+    # Add margin requirements
+    metrics["maintenance_margin_pct"] = results.get("maintenance_margin_pct", 0)
+    metrics["initial_margin_pct"] = results.get("initial_margin_pct", 0)
+
+    # Capital allocation metrics
+    metrics["spot_allocation"] = results.get("spot_allocation", 0)
+    metrics["perp_allocation"] = results.get("perp_allocation", 0)
 
     return metrics
 
@@ -237,3 +297,52 @@ def print_performance_summary(results, metrics):
     print(f"  Initial notional: ${results['initial_notional']:.2f}")
     print(f"  Final notional: ${results['final_notional']:.2f}")
     print(f"  Capital efficiency ratio: {metrics['capital_efficiency']:.2f}x")
+
+    # Print risk metrics summary
+    print("\n=== RISK METRICS ===")
+
+    # Health factor metrics
+    if "min_health_factor" in metrics:
+        print(f"  Minimum Health Factor: {metrics['min_health_factor']:.2f}")
+        print(f"  Average Health Factor: {metrics['avg_health_factor']:.2f}")
+        print(f"  Final Health Factor: {metrics['final_health_factor']:.2f}")
+        print(f"  Time in High Risk Zone (<1.5): {metrics['pct_time_high_risk']:.2f}%")
+        print(f"  Time in Safe Zone (>3.0): {metrics['pct_time_safe']:.2f}%")
+
+    # Liquidation buffer metrics
+    if "min_liquidation_buffer" in metrics:
+        print(
+            f"\n  Minimum Liquidation Buffer: {metrics['min_liquidation_buffer']:.2f}%"
+        )
+        print(f"  Average Liquidation Buffer: {metrics['avg_liquidation_buffer']:.2f}%")
+        print(f"  Final Liquidation Buffer: {metrics['final_liquidation_buffer']:.2f}%")
+        print(
+            f"  Time in Danger Zone (<10% buffer): {metrics['pct_time_danger_zone']:.2f}%"
+        )
+
+    # Close calls
+    if "liquidation_close_calls" in metrics:
+        print(f"\n  Near-Liquidation Events: {metrics['liquidation_close_calls']}")
+
+    # Capital allocation
+    if "spot_allocation" in metrics and "perp_allocation" in metrics:
+        initial_capital = results["initial_capital"]
+        print(f"\n  Capital Allocation:")
+        print(
+            f"    Spot: ${metrics['spot_allocation']:.2f} ({metrics['spot_allocation']/initial_capital*100:.2f}% of capital)"
+        )
+        print(
+            f"    Perp: ${metrics['perp_allocation']:.2f} ({metrics['perp_allocation']/initial_capital*100:.2f}% of capital)"
+        )
+
+    # Risk assessment
+    if "final_health_factor" in metrics:
+        print("\n  Risk Assessment:")
+        if metrics["final_health_factor"] >= 3:
+            print("    Position Status: VERY SAFE")
+        elif metrics["final_health_factor"] >= 1.5:
+            print("    Position Status: MODERATE RISK")
+        elif metrics["final_health_factor"] >= 1:
+            print("    Position Status: HIGH RISK")
+        else:
+            print("    Position Status: DANGER - LIQUIDATION IMMINENT")

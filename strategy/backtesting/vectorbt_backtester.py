@@ -81,17 +81,26 @@ class VectorbtBacktester:
         # Adjust funding rate for timeframe if needed
         adjusted_funding_rate = funding_rate * funding_multiplier
 
-        # Calculate position size
-        position_size = (
-            self.initial_capital * self.leverage / 2
-        )  # Split between spot and perp
+        # Calculate position size based on capital-efficient allocation
+        # For perp leverage of L, allocate:
+        # perp_allocation = capital / (1 + L)
+        # spot_allocation = capital - perp_allocation
+        perp_allocation = self.initial_capital / (1 + self.leverage)
+        spot_allocation = self.initial_capital - perp_allocation
+
+        # Calculate position sizes based on allocations
+        perp_notional = perp_allocation * self.leverage
+        spot_notional = spot_allocation
+
+        # Ensure delta neutrality
+        target_notional = min(perp_notional, spot_notional)
 
         # Calculate quantities
-        spot_quantity = position_size / spot_price[0]
-        perp_quantity = position_size / perp_price[0]
+        spot_quantity = spot_notional / spot_price[0]
+        perp_quantity = perp_notional / perp_price[0]
 
         # Calculate entry fees
-        entry_fee = position_size * 2 * self.fee_rate
+        entry_fee = (spot_notional + perp_notional) * self.fee_rate
 
         # Create a vectorized calculation of P&L
         # For spot: long position, so profit when price goes up
@@ -136,8 +145,8 @@ class VectorbtBacktester:
 
         # Calculate risk metrics for each time step
         for i in range(len(dates)):
-            # Calculate current equity
-            current_equity = self.initial_capital + total_pnl[i] - entry_fee
+            # Calculate current equity (capital + PnL up to this point)
+            current_equity = perp_allocation + perp_pnl[i] + cumulative_funding[i]
 
             # Calculate maintenance margin requirement
             current_perp_notional = perp_notional[i]
@@ -154,10 +163,14 @@ class VectorbtBacktester:
             health_factors.append(health_factor)
 
             # Calculate liquidation price for short perp position
-            # Liquidation occurs when: equity <= maintenance margin
-            # For a short position, price increase leads to losses
-            liquidation_price = perp_price[0] * (
-                1 + (self.maint_margin_pct / 100) / self.leverage
+            # At liquidation: perp_allocation + perp_pnl = maintenance_margin
+            # perp_pnl = perp_quantity * (perp_entry - current_price)
+            # perp_allocation + perp_quantity * (perp_entry - liq_price) = maint_margin
+            # Solving for liq_price:
+            # liq_price = perp_entry - (maint_margin - perp_allocation) / perp_quantity
+            liquidation_price = (
+                perp_price[0]
+                + (perp_allocation - maint_margin_requirement) / perp_quantity
             )
             liquidation_prices.append(liquidation_price)
 
@@ -209,6 +222,8 @@ class VectorbtBacktester:
             "funding_rates": funding_rate.tolist(),
             "annualized_funding_rates": annualized_funding_rates.tolist(),
             "data": self.data,
+            "spot_allocation": float(spot_allocation),
+            "perp_allocation": float(perp_allocation),
             # Risk metrics
             "health_factors": health_factors,
             "liquidation_prices": liquidation_prices,
