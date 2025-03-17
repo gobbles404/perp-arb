@@ -41,3 +41,7 @@ binance_data_pipeline/data/**/*
 # Re-exclude other files in contracts directory
 binance_data_pipeline/data/contracts/*
 !binance_data_pipeline/data/contracts/fut_expirys.csv
+
+# Exclude results directory
+backtesting/results/
+backtesting/
