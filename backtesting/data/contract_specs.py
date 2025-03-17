@@ -5,7 +5,7 @@ from typing import Dict, List, Optional, Any
 from datetime import datetime
 
 # Import the logger
-from backtesting.logger import get_logger
+from core.logger import get_logger
 
 # Create a logger instance for contract_specs
 logger = get_logger(__name__)
