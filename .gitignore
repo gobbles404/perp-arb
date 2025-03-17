@@ -27,3 +27,17 @@ Thumbs.db
 
 # Backtesting Results
 strategy/results/
+
+# Exclude all data directories and files first
+binance_data_pipeline/data/*
+binance_data_pipeline/data/**/*
+
+# Then explicitly include what you want to keep
+!binance_data_pipeline/data/markets/
+!binance_data_pipeline/data/markets/**
+!binance_data_pipeline/data/contracts/
+!binance_data_pipeline/data/contracts/fut_expirys.csv
+
+# Re-exclude other files in contracts directory
+binance_data_pipeline/data/contracts/*
+!binance_data_pipeline/data/contracts/fut_expirys.csv
