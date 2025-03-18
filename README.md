@@ -8,7 +8,6 @@ A comprehensive system for fetching, processing, and analyzing market data from 
 
 ```bash
 git clone https://github.com/gobbles404/perp-arb.git
-cd binance_data_pipeline
 ```
 
 ### 2. Install Dependencies
@@ -27,6 +26,12 @@ BINANCE_SECRET_KEY=your_secret_here
 ```
 
 ## Usage
+
+Change directories to binance_data_pipeline
+
+```
+cd binance_data_pipeline
+```
 
 ### Fetch Market Data
 
