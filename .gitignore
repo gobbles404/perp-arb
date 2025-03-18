@@ -45,3 +45,5 @@ binance_data_pipeline/data/contracts/*
 # Exclude results directory
 backtesting/results/
 backtesting/
+
+expiry_backup.csv
